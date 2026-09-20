@@ -65,9 +65,17 @@ JunWRT comes with built-in commercial machine-tied licensing:
   - Crisp, professional #ffffff background across all modem sub-pages (Cell Scan, SIM, Band Lock, IMEI, APN, TTL, AT Debug, SMS).
   - High-contrast solid buttons and status badges.
   - Zero eye strain, eliminating dated stock gradients.
+* **🛡️ PassWall 2 Modern UI & 1-Click Link Import**:
+  - Completely restyled with modern card layout, clean typography, and status badges.
+  - 1-Click **"Add Node via Link"** modal supporting `vless://`, `vmess://`, `ss://`, `ssr://`, and `trojan://` sharing URLs.
+* **🌐 Tailscale Mesh VPN Engine**:
+  - **1-Click Auth Key Login**: Paste your `tskey-auth-...` key and connect instantly in 1–2 seconds.
+  - **Sub-Second Web Login**: Fast non-blocking auth URL generation with zero 30s freezes.
+  - **Anti-OOM Protection**: Capped at 48MB RAM (`GOMEMLIMIT=48MiB`, `GOGC=15`), preventing daemon memory ballooning and kernel OOM kills.
+  - **Direct WireGuard P2P**: Native OpenWrt fw3 (`iptables`) mode with WAN UDP port 41641 open, bypassing slow DERP relay servers.
 * **🔒 Safe & Non-Destructive**:
   - Overwrites only LuCI WebUI templates, scripts, and styling.
-  - **Does NOT modify** Wi-Fi SSIDs, passwords, firewall rules, or user packages.
+  - **Does NOT modify** Wi-Fi SSIDs, passwords, or carrier aggregation settings.
   - **Zero modem AT overrides**: Preserves full 5G SA/NSA n78 carrier aggregation and baseband stability.
 * **💻 Custom Slant Terminal Banner**:
   - Includes custom slant ASCII banner and automatically synchronizes the system hostname to JunWRT.

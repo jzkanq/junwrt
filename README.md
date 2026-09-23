@@ -12,11 +12,11 @@ Modern, high-contrast, pure-white WebUI theme and real-time Cellular Cockpit for
 
 Connect to your router via SSH (PuTTY, Terminal, or Command Prompt) and run this single command:
 
-`sh
-wget --no-check-certificate -qO /tmp/install.sh https://raw.githubusercontent.com/jzkanq/junwrt/main/install_webui_only.sh && sh /tmp/install.sh
-`
+```sh
+wget -qO /tmp/install.sh https://raw.githubusercontent.com/jzkanq/junwrt/main/install_webui_only.sh && sh /tmp/install.sh
+```
 
-> **Note:** Internet access on the router is required during download. The installation completes in under 15 seconds and does **not** reboot your router.
+> **Note:** Internet access on the router is required for this command. The installer does not reboot the router, but it reloads networking and restarts Tailscale and LuCI services, which can briefly interrupt access.
 
 ---
 
@@ -27,14 +27,13 @@ wget --no-check-certificate -qO /tmp/install.sh https://raw.githubusercontent.co
 2. Host Name: 192.168.1.1 (or your router\'s LAN IP).
 3. Port: 22 | Connection type: SSH.
 4. Click **Open**.
-5. Log in as: 
-oot (enter your router\'s password).
+5. Log in as `root` with your router password.
 
 ### Step 2: Paste the 1-Line Installer Command
 Copy and right-click in PuTTY to paste:
-`sh
-wget --no-check-certificate -qO /tmp/install.sh https://raw.githubusercontent.com/jzkanq/junwrt/main/install_webui_only.sh && sh /tmp/install.sh
-`
+```sh
+wget -qO /tmp/install.sh https://raw.githubusercontent.com/jzkanq/junwrt/main/install_webui_only.sh && sh /tmp/install.sh
+```
 Press **Enter**. You will see the slant JunWRT banner and installation progress.
 
 ### Step 3: Clear Browser Cache & Access WebUI
@@ -73,10 +72,10 @@ JunWRT comes with built-in commercial machine-tied licensing:
   - **Sub-Second Web Login**: Fast non-blocking auth URL generation with zero 30s freezes.
   - **Anti-OOM Protection**: Capped at 48MB RAM (`GOMEMLIMIT=48MiB`, `GOGC=15`), preventing daemon memory ballooning and kernel OOM kills.
   - **Direct WireGuard P2P**: Native OpenWrt fw3 (`iptables`) mode with WAN UDP port 41641 open, bypassing slow DERP relay servers.
-* **🔒 Safe & Non-Destructive**:
-  - Overwrites only LuCI WebUI templates, scripts, and styling.
-  - **Does NOT modify** Wi-Fi SSIDs, passwords, or carrier aggregation settings.
-  - **Zero modem AT overrides**: Preserves full 5G SA/NSA n78 carrier aggregation and baseband stability.
+* **🔒 Configuration scope**:
+  - Does not change Wi-Fi SSIDs, Wi-Fi passwords, or modem AT settings.
+  - Sets the hostname and LuCI theme, configures Tailscale firewall rules, and reloads networking and related services.
+  - Back up the router configuration before installation.
 * **💻 Custom Slant Terminal Banner**:
   - Includes custom slant ASCII banner and automatically synchronizes the system hostname to JunWRT.
 
@@ -93,6 +92,6 @@ JunWRT comes with built-in commercial machine-tied licensing:
 
 If your router does not have internet access, you can download install_webui_only.sh to your PC, upload it via WinSCP to /tmp/, and execute:
 
-`sh
+```sh
 sh /tmp/install_webui_only.sh
-`
+```

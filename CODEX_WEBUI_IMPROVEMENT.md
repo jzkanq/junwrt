@@ -6,12 +6,13 @@ This document is the authoritative engineering specification and context guide f
 
 ## 1. Executive Hardware & Software Overview
 
-* **Hardware Appliance**: Arcadyan AW1000 Ultra (High-Performance 5G CPE).
+* **Hardware Appliance**: Arcadyan AW1000 Ultra (High-Performance Carrier-Grade 5G CPE).
 * **SoC Platform**: MediaTek MT6890 / T750 (Quad-Core ARM Cortex-A55 @ 2.0 GHz, AArch64).
 * **Baseband & Cellular Subsystem**: Fibocom FG360 5G NR Sub-6 modem connected via internal USB 3.0 / PCIe bus.
 * **Wi-Fi Subsystem**: MediaTek MT7915 Wi-Fi 6 chipset (Dual-Band 2.4 GHz + 5 GHz 80MHz, 1201 Mbps PHY rate).
-* **Operating System**: OpenWrt 23.05 Carrier-Grade Custom Distribution.
-* **Web Management Engine**: LuCI WebUI (LuCI JavaScript client-side MVC architecture) powered by `uhttpd` and `rpcd`.
+* **Operating System**: **OpenWrt 19.07.7** (`r11306-c4a6851c72`, target `mt6890/evb6890v1_64_cpe`).
+* **Firewall Framework**: OpenWrt **`fw3` (iptables)** with `/etc/firewall.user` hooks (NOTE: This is NOT `fw4`/nftables).
+* **Web Management Engine**: LuCI WebUI (client-side JavaScript MVC architecture, adapted/backported from LuCI modern branch) powered by `uhttpd` and `rpcd`.
 * **Primary Theme**: Heavily customized `luci-theme-argon` with a custom **Modern Hardware Appliance Design System** and **Universal Forced OLED Pure Black Dark Mode**.
 
 ---
@@ -20,23 +21,27 @@ This document is the authoritative engineering specification and context guide f
 
 Codex must strictly follow these rules under all circumstances:
 
-1. **Strict Unix LF (`\n`) Line Endings (0 CRLF)**:
+1. **Target OpenWrt 19.07.7 / fw3 (iptables) Compatibility**:
+   * Never introduce OpenWrt 22.03+ / 23.05+ `nftables` or `fw4` syntax.
+   * Any firewall rules, routing hooks, and packet filter configurations must use standard Linux `iptables` / `ip6tables` and `/etc/firewall.user`.
+
+2. **Strict Unix LF (`\n`) Line Endings (0 CRLF)**:
    * Every file inside `stock_rootfs/`, shell scripts, LuCI JavaScript views, Lua templates, and CSS stylesheets must strictly have Unix LF line endings.
    * CRLF will break BusyBox ash parsing, LuCI template evaluation, and causes deployment errors.
 
-2. **ABSOLUTELY NO `.bin` FIRMWARE BUILDS**:
+3. **ABSOLUTELY NO `.bin` FIRMWARE BUILDS**:
    * Do NOT run `build_junwrt.py` or generate raw NAND flash images (`.bin`).
    * WebUI development and deployment is strictly handled via the standalone hot-deployer script: `install_webui_only.sh`.
 
-3. **Preserve Custom 27KB Cockpit Dashboard (`3gdetail.js`)**:
+4. **Preserve Custom 27KB Cockpit Dashboard (`3gdetail.js`)**:
    * Never overwrite or regress `3gdetail.js` to the 50KB stock version.
    * Preserve all underlying telemetry IDs (`j_stat_op`, `j_stat_mode`, `j_stat_sig`, `j_rx_pwr`, `j_pbar_1` to `j_pbar_4`, `j_scc1_block`, `j_scc2_block`, `j_ca_status`, etc.) and XHR endpoints.
 
-4. **Zero-Flicker Dark Mode Pre-Render Architecture**:
+5. **Zero-Flicker Dark Mode Pre-Render Architecture**:
    * The early `<script>` in `<head>` inside `header.htm` that checks `localStorage.getItem('junwrt_theme')` must be preserved.
    * It immediately sets `data-theme="dark"` and `.dark-mode` on `document.documentElement` before the DOM renders to prevent any white-flash flicker (FOUC).
 
-5. **Universal Forced OLED Pure Black Palette (`#000000`)**:
+6. **Universal Forced OLED Pure Black Palette (`#000000`)**:
    * In Dark Mode:
      - Main viewport, body, header, sidebar, footer: `#000000` (pitch black).
      - Cards, containers, sections: `#0a0a0a` or `#0f0f0f` with `#222222` borders.
@@ -46,11 +51,11 @@ Codex must strictly follow these rules under all circumstances:
    * In Light Mode:
      - All modem sub-pages and cards must remain pure white (`#ffffff`) with subtle slate borders (`#e2e8f0`).
 
-6. **Wi-Fi SSID Invariant**:
+7. **Wi-Fi SSID Invariant**:
    * 2.4 GHz SSID: `JunWRT 2.4G`
    * 5 GHz SSID: `JunWRT 5G`
 
-7. **LuCI Static Resource Invariant**:
+8. **LuCI Static Resource Invariant**:
    * Never append query parameters (such as `?v=...`) to CSS imports in LuCI JavaScript views (`L.resource()`), because LuCI executes an XMLHttpRequest which treats `?` as an invalid local URL path.
 
 ---
@@ -61,6 +66,10 @@ All source files reside inside `d:\JunWRT\stock_rootfs\`:
 
 ```
 d:\JunWRT\stock_rootfs\
+├── etc\
+│   ├── openwrt_release       <- Specifies DISTRIB_RELEASE='19.07.7', DISTRIB_TARGET='mt6890/evb6890v1_64_cpe'
+│   ├── banner                <- Displays JunWRT 19.07.7, r11306-c4a6851c72
+│   └── opkg\distfeeds.conf   <- Official 19.07.7 package feeds for MT6890
 ├── usr\
 │   ├── lib\lua\luci\
 │   │   ├── view\
@@ -238,14 +247,17 @@ Copy and paste the prompt below directly into Codex when initiating an improveme
 ```text
 You are an expert embedded systems WebUI developer and CSS architect working on the JunWRT project for the Arcadyan AW1000 Ultra 5G CPE (MediaTek MT6890 / T750 + MT7915 Wi-Fi 6).
 
+The underlying OS is OpenWrt 19.07.7 (r11306-c4a6851c72) using fw3 (iptables).
 You have read and must strictly follow CODEX_WEBUI_IMPROVEMENT.md.
+
 CRITICAL INVARIANTS:
-1. Every modified file must use strict Unix LF (\n) line endings (0 CRLF).
-2. Do NOT generate or run any .bin firmware build commands. WebUI is deployed via install_webui_only.sh.
-3. Preserve the 27KB Cockpit Dashboard in 3gdetail.js (do not regress or overwrite with 50KB stock version).
-4. Preserve the zero-flicker pre-render script in header.htm.
-5. In Dark Mode, enforce universal forced OLED pitch-black (#000000 background, #0a0a0a cards, #121212 inputs, #222222 borders). In Light Mode, preserve pure white (#ffffff) appliance styling.
-6. After editing files in stock_rootfs, build install_webui_only.sh with `python d:\JunWRT\tools\build_install_webui_sh.py` and commit/push to git in `d:\JunWRT\github_repo`.
+1. Target OpenWrt 19.07.7 / fw3 (iptables). Never introduce fw4/nftables syntax.
+2. Every modified file must use strict Unix LF (\n) line endings (0 CRLF).
+3. Do NOT generate or run any .bin firmware build commands. WebUI is deployed via install_webui_only.sh.
+4. Preserve the 27KB Cockpit Dashboard in 3gdetail.js (do not regress or overwrite with 50KB stock version).
+5. Preserve the zero-flicker pre-render script in header.htm.
+6. In Dark Mode, enforce universal forced OLED pitch-black (#000000 background, #0a0a0a cards, #121212 inputs, #222222 borders). In Light Mode, preserve pure white (#ffffff) appliance styling.
+7. After editing files in stock_rootfs, build install_webui_only.sh with `python d:\JunWRT\tools\build_install_webui_sh.py` and commit/push to git in `d:\JunWRT\github_repo`.
 
 TASK:
 [Insert your specific task here: e.g. refactor CSS variables, polish mobile layout, improve AT debug terminal, etc.]

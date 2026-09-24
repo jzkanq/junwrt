@@ -14,10 +14,10 @@ When working in this workspace or modifying the AW1000 OpenWrt firmware and inst
 
 ## 2. WebUI & Modem Cockpit Architecture
 * **Cockpit Dashboard (`3gdetail.js`)**:
-  - Always preserve the custom Cockpit Dashboard (`3gdetail.js`) featuring `junwrtCockpitStyle` (currently about 37 KB with both layouts).
+  - Always preserve the custom Cockpit Dashboard (`3gdetail.js`) featuring `junwrtCockpitStyle` (currently about 40 KB with both layouts).
   - Never overwrite or regress it to the 50KB stock version.
-  - `JunWRT Settings` may select `Standard` or `Signal & Antenna` for the cockpit only. Persist the choice in browser key `junwrt_cockpit_theme`; do not couple it to the global Light/Dark/Auto setting.
-  - The `Signal & Antenna` cockpit design includes a live RSRP dial and live RX0–RX3 readings. Keep the standard cockpit as the default and preserve both layouts' telemetry IDs and update behavior.
+  - `JunWRT Settings` may select `Standard` or `Signal Diagnostics` for the cockpit only. Persist the choice in browser key `junwrt_cockpit_theme`; do not couple it to the global Light/Dark/Auto setting.
+  - The `Signal Diagnostics` cockpit uses a responsive three-column layout with live signal, connection, and antenna data, including RX0–RX3 readings. Keep the standard cockpit as the default and preserve both layouts' telemetry IDs and update behavior.
 * **Modem Sub-Page Surfaces**:
   - The 8 modem sub-pages (`cellscan.js`, `sim.js`, `lockband.js`, `imei.js`, `apn.js`, `ttl.js`, `atdebug.js`, `sms.js`) use clean white backgrounds (`#ffffff`) in Light Mode, eliminating stock green/cyan gradients.
   - In Dark Mode, those pages use neutral graphite gray surfaces; no white or pale surface may remain visible. Preserve factory controls, table layouts, form alignments, IDs, and endpoints.
@@ -48,7 +48,7 @@ Whenever improving, modernizing, or refactoring LuCI WebUI pages, status modules
 * **Card Container**:
   - Light Mode: pure white background (`#ffffff`), `border: 1px solid #e2e8f0`, `border-radius: 12px`, soft dual-layer shadow (`0 1px 3px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.03)`).
   - Dark Mode: use the neutral graphite tokens in Section 8. Blue-tinted navy surfaces are not allowed.
-  - The separately selectable Signal & Antenna cockpit may use tighter 8px card corners and flatter graphite cards to match its radio-instrument layout.
+  - The separately selectable Signal Diagnostics cockpit may use compact 5px cards and a responsive three-column layout. Use light neutral surfaces in Light Mode and graphite surfaces in Dark Mode.
   - Header: flex row with deep slate title (`#0f172a`), badge pills, and right-aligned action toolbar.
 * **Typography & Grids**:
   - Replace pipe-delimited raw strings or old `cbi-section-table` styling with structured grid/flex layouts.
@@ -87,15 +87,16 @@ Whenever improving, modernizing, or refactoring LuCI WebUI pages, status modules
   - Reserve blue (`#0284c7`) for primary actions and restrained links/focus accents; it must not tint the overall shell.
 * **Theme Styling Invariant**:
   - All modern sub-pages using `.ginfo-page` must support dual-mode styles: clean pure-white (`#ffffff`) surfaces in Light Mode, and neutral graphite (`#202124` container, `#292a2d` cards, `#3f4044` borders, `#e8eaed` text) in Dark Mode.
-  - Exception: when `junwrt_cockpit_theme=radio`, `.jun-cockpit-radio` is an explicitly selected graphite cockpit surface in either global appearance mode; its nested cards and controls must remain graphite with readable text.
+  - When `junwrt_cockpit_theme=radio`, `.jun-cockpit-radio` is an explicitly selected layout that follows the global appearance: light neutral surfaces in Light Mode and graphite surfaces in Dark Mode. Keep nested cards, controls, and telemetry readable in both modes.
   - White surfaces are Light Mode only. In Dark Mode, audit active CSS, JavaScript inline styles, and templates for `white`, `#fff`, `#ffffff`, and `rgb(255, 255, 255)`; every background match must be overridden to graphite. White text on high-contrast action buttons remains allowed.
 
 ## 9. WebUI Change Notes & Surface Audit
 * For every implementation change, review and refine this `AGENTS.md` in the same change so its rules stay current and contradictions are removed.
 * For every LuCI visual change, search active UI sources for white background declarations and confirm they are either Light Mode styles or have an effective Dark Mode override. Record the result with the change.
 * For every LuCI JavaScript view change, run `node --check` on each changed module and verify the generated installer contains the corrected source before release.
-* Cockpit theme change note (2026-09-24): added a separate `Standard` / `Signal & Antenna` choice in JunWRT Settings, persisted per browser and applied only to Cellular Baseband Cockpit. The alternate design uses graphite surfaces in both global modes. Audit found its white action-button text is on solid high-contrast action buttons; no white card or page background is used by the alternate cockpit surface.
+* Cockpit theme update (2026-09-24): the separate `junwrt_cockpit_theme=radio` option is labeled `Signal Diagnostics` and uses a responsive three-column telemetry layout. It remains independent of the global theme preference; Light Mode uses light neutral surfaces and Dark Mode uses graphite. Preserve existing telemetry IDs and live update behavior, keep installer and rootfs view sources synchronized, and verify every light surface has an effective Dark Mode override.
 * JunWRT Settings syntax fix (2026-09-24): the cockpit-choice `Array.map()` renderer had an extra closing square bracket after the mapped expression, preventing the entire settings view from parsing. Keep the renderer closure balanced and run `node --check` for this view before building its installer payload.
 * The modem cockpit CSS is duplicated inside `cellscan.js`, `sim.js`, `lockband.js`, `imei.js`, `atdebug.js`, and `sms.js`; keep those Dark Mode rules aligned with the shared `3ginfo-white.css` / `3ginfo-lite.css` styles. The APN, TTL, and JunWRT Settings views use `.ginfo-page` rules, including `junwrt-settings.css`.
 * Wi-Fi overview change note (2026-09-24): refreshed `stock_rootfs/usr/lib/lua/luci/view/admin_mtk/mtk_wifi_overview.htm` with flatter radio/network sections, quieter labels, and left-aligned responsive controls; synchronized `WinSCP_Deploy_Modem/mtk_wifi_overview.htm`. Surface audit found the active white and pale fills belong to Light Mode cards, forms, and status/alert states; matching Dark Mode selectors replace them with graphite surfaces. White text remains limited to high-contrast actions. Existing form IDs/names, LuCI URLs, controller actions, and JavaScript handlers were preserved. Both templates have LF line endings; authenticated live rendering was unavailable at the router login screen.
+* PassWall client change note (2026-09-24): added `passwall-modern.css` for the legacy PassWall status/configuration page and linked it from `passwall/global/status.htm`; added both files to `tools/build_install_webui_sh.py`. The Light Mode card, tab, form, table, and input surfaces are white or pale neutral, with Dark Mode overrides to graphite. Existing PassWall CBI field names, IDs, polling, and connectivity actions were left intact. The stylesheet uses a static LuCI resource URL without query parameters.
 * Keep `README.md`, the handover guide, audit rules, and installer messages mode-accurate: white is Light Mode styling and Dark Mode uses the graphite tokens above.

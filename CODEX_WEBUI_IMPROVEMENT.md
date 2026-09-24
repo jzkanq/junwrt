@@ -254,6 +254,8 @@ CRITICAL INVARIANTS:
 6. In Dark Mode, use the neutral graphite palette in `AGENTS.md`; white surfaces are Light Mode only. In Light Mode, preserve pure white (#ffffff) appliance styling.
 7. After editing files in stock_rootfs, build install_webui_only.sh with `python d:\JunWRT\tools\build_install_webui_sh.py` and commit/push to git in `d:\JunWRT\github_repo`.
 
+Login background note (2026-09-24): the Argon login template keeps `#202124` as its dark fallback but must not suppress `background-image` on `.login-page`; the saved graphite, slate, steel, mist, and custom image choices must still render in Dark Mode. `verify_junwrt.py` and `deep_audit.py` inspect the embedded login template in the canonical installer so the WebUI-only release gate covers the file users will install without rebuilding firmware.
+
 TASK:
 [Insert your specific task here: e.g. refactor CSS variables, polish mobile layout, improve AT debug terminal, etc.]
 ```

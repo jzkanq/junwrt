@@ -13,7 +13,7 @@ This document is the authoritative engineering specification and context guide f
 * **Operating System**: **OpenWrt 19.07.7** (`r11306-c4a6851c72`, target `mt6890/evb6890v1_64_cpe`).
 * **Firewall Framework**: OpenWrt **`fw3` (iptables)** with `/etc/firewall.user` hooks (NOTE: This is NOT `fw4`/nftables).
 * **Web Management Engine**: LuCI WebUI (client-side JavaScript MVC architecture, adapted/backported from LuCI modern branch) powered by `uhttpd` and `rpcd`.
-* **Primary Theme**: Heavily customized `luci-theme-argon` with a custom **Modern Hardware Appliance Design System** and **Universal Forced OLED Pure Black Dark Mode**.
+* **Primary Theme**: Heavily customized `luci-theme-argon` with the **Modern Hardware Appliance Design System**, white Light Mode surfaces, and neutral graphite Dark Mode.
 
 ---
 
@@ -41,15 +41,10 @@ Codex must strictly follow these rules under all circumstances:
    * The early `<script>` in `<head>` inside `header.htm` that checks `localStorage.getItem('junwrt_theme')` must be preserved.
    * It immediately sets `data-theme="dark"` and `.dark-mode` on `document.documentElement` before the DOM renders to prevent any white-flash flicker (FOUC).
 
-6. **Universal Forced OLED Pure Black Palette (`#000000`)**:
-   * In Dark Mode:
-     - Main viewport, body, header, sidebar, footer: `#000000` (pitch black).
-     - Cards, containers, sections: `#0a0a0a` or `#0f0f0f` with `#222222` borders.
-     - Form inputs, selects, textareas, terminal consoles: `#121212` with `#262626` borders.
-     - Table headers: `#121212`, zebra striping: `#0d0d0d`, hover: `#141414`.
-     - Neutral / Secondary buttons: `#141414` (border `#2a2a2a`, text `#f5f5f5`, hover `#222222` with Sky Blue accent).
-   * In Light Mode:
-     - All modem sub-pages and cards must remain pure white (`#ffffff`) with subtle slate borders (`#e2e8f0`).
+6. **Neutral Graphite Dark Palette**:
+   * In Dark Mode, use page `#202124`, cards `#292a2d`, elevated surfaces `#35363a`, borders `#3f4044` / `#5a5d63`, and soft neutral text `#e8eaed` / `#c4c7cc` / `#9aa0a6`.
+   * Blue is reserved for primary actions and restrained focus/link accents; it must not tint the overall shell.
+   * In Light Mode, white (`#ffffff`) modem surfaces remain supported with slate borders (`#e2e8f0`).
 
 7. **Wi-Fi SSID Invariant**:
    * 2.4 GHz SSID: `JunWRT 2.4G`
@@ -92,7 +87,7 @@ d:\JunWRT\stock_rootfs\
     ├── argon\
     │   ├── css\
     │   │   ├── cascade.css           <- Argon base styles + Modern Hardware Appliance overrides
-    │   │   └── dark.css              <- Argon dark stylesheet + Universal OLED black overrides
+    │   │   └── dark.css              <- Argon dark stylesheet + neutral graphite overrides
     │   └── img\
     │       ├── argon.svg             <- Appliance SVG logo
     │       └── aw1000.png            <- Hardware photo for status page
@@ -101,7 +96,7 @@ d:\JunWRT\stock_rootfs\
         └── view\
             ├── modem\
             │   ├── 3gdetail.js       <- 27KB Real-Time Baseband Cockpit
-            │   ├── 3ginfo-white.css  <- Pure white / OLED black modern appliance stylesheet
+            │   ├── 3ginfo-white.css  <- Light-white / dark-graphite appliance stylesheet
             │   ├── 3ginfo-lite.css   <- Synchronized clone of 3ginfo-white.css
             │   ├── junwrt_settings.js<- Theme selector (Light / Dark / Auto) & Telemetry
             │   ├── cellscan.js       <- Modern Cell Scan & Neighboring PCI Lock
@@ -151,7 +146,7 @@ Located in `usr/lib/lua/luci/view/themes/argon/header.htm`:
     })();
 </script>
 ```
-* **Why this matters**: In stock themes, JavaScript runs late after `<body>` is painted, causing a blinding white flash. Our implementation runs synchronously in `<head>`, ensuring the browser paints the very first frame in OLED black.
+* **Why this matters**: In stock themes, JavaScript runs late after `<body>` is painted, causing a white flash. Our implementation runs synchronously in `<head>`, ensuring the first frame uses the selected theme.
 
 ### B. Navigation Bar Theme Toggle
 * **Element**: `<button id="junwrt-theme-toggle" class="jun-theme-btn">` inside `header.htm`.
@@ -212,13 +207,13 @@ Codex should focus on the following high-value improvements while maintaining al
 ### 1. CSS Architecture & Custom Property Unification
 * **Current State**: Styles are divided between `cascade.css`, `dark.css`, and `3ginfo-white.css`, with multiple `!important` color overrides.
 * **Goal**: Establish a centralized CSS Custom Property system on `:root` and `[data-theme="dark"]`:
-  - `--jw-bg-base`: `#ffffff` (light) / `#000000` (dark)
-  - `--jw-bg-surface`: `#ffffff` (light) / `#0a0a0a` (dark)
-  - `--jw-bg-elevated`: `#f8fafc` (light) / `#121212` (dark)
-  - `--jw-border-subtle`: `#e2e8f0` (light) / `#1f1f1f` (dark)
-  - `--jw-border-strong`: `#cbd5e1` (light) / `#262626` (dark)
-  - `--jw-text-primary`: `#0f172a` (light) / `#f8fafc` (dark)
-  - `--jw-text-secondary`: `#64748b` (light) / `#a3a3a3` (dark)
+  - `--jw-bg-base`: `#ffffff` (light) / `#202124` (dark)
+  - `--jw-bg-surface`: `#ffffff` (light) / `#292a2d` (dark)
+  - `--jw-bg-elevated`: `#f8fafc` (light) / `#35363a` (dark)
+  - `--jw-border-subtle`: `#e2e8f0` (light) / `#3f4044` (dark)
+  - `--jw-border-strong`: `#cbd5e1` (light) / `#5a5d63` (dark)
+  - `--jw-text-primary`: `#0f172a` (light) / `#e8eaed` (dark)
+  - `--jw-text-secondary`: `#64748b` (light) / `#c4c7cc` (dark)
   - `--jw-accent`: `#0284c7` (both) / `--jw-accent-hover`: `#0369a1`
 * Clean up duplicate override rules without breaking specificity.
 
@@ -256,7 +251,7 @@ CRITICAL INVARIANTS:
 3. Do NOT generate or run any .bin firmware build commands. WebUI is deployed via install_webui_only.sh.
 4. Preserve the 27KB Cockpit Dashboard in 3gdetail.js (do not regress or overwrite with 50KB stock version).
 5. Preserve the zero-flicker pre-render script in header.htm.
-6. In Dark Mode, enforce universal forced OLED pitch-black (#000000 background, #0a0a0a cards, #121212 inputs, #222222 borders). In Light Mode, preserve pure white (#ffffff) appliance styling.
+6. In Dark Mode, use the neutral graphite palette in `AGENTS.md`; white surfaces are Light Mode only. In Light Mode, preserve pure white (#ffffff) appliance styling.
 7. After editing files in stock_rootfs, build install_webui_only.sh with `python d:\JunWRT\tools\build_install_webui_sh.py` and commit/push to git in `d:\JunWRT\github_repo`.
 
 TASK:

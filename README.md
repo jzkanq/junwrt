@@ -39,7 +39,7 @@ Press **Enter**. You will see the slant JunWRT banner and installation progress.
 ### Step 3: Clear Browser Cache & Access WebUI
 1. Open your browser and navigate to http://192.168.1.1.
 2. Press **Ctrl + Shift + R** (or Cmd + Shift + R on Mac) to perform a hard refresh and purge old LuCI cached files.
-3. Enjoy the brand-new JunWRT Cockpit and Modern Pure White interface!
+3. Enjoy the JunWRT Cockpit with white Light Mode and graphite-gray Dark Mode styling.
 
 ---
 
@@ -60,8 +60,8 @@ JunWRT comes with built-in commercial machine-tied licensing:
   - Live signal gauges (RSRP, RSRQ, SINR, RSSI, CQI).
   - Carrier Aggregation (CA) band tracking (Primary + Secondary Component Carriers).
   - Cell ID, eNodeB / gNodeB, Bandwidth, and PCI live monitoring.
-* **🎨 Pure White Modern Hardware Appliance UI**:
-  - Crisp, professional #ffffff background across all modem sub-pages (Cell Scan, SIM, Band Lock, IMEI, APN, TTL, AT Debug, SMS).
+* **🎨 Light / Dark Modern Hardware Appliance UI**:
+  - Crisp white Light Mode and neutral graphite-gray Dark Mode across all modem sub-pages (Cell Scan, SIM, Band Lock, IMEI, APN, TTL, AT Debug, SMS).
   - High-contrast solid buttons and status badges.
   - Zero eye strain, eliminating dated stock gradients.
 * **🛡️ PassWall 2 Modern UI & 1-Click Link Import**:

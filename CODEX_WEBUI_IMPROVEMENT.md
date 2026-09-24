@@ -108,7 +108,7 @@ d:\JunWRT\stock_rootfs\
             │   ├── atdebug.js        <- AT command interactive terminal
             │   └── sms.js            <- SMS messaging client & modern table
             ├── passwall2\
-            │   └── passwall2-modern.css <- Dark mode compatible PassWall 2 styles
+            │   └── passwall2-modern-v2.css <- Cache-renewed PassWall 2 styles with Dark Mode dropdown fixes
             └── tailscale.js          <- Tailscale mesh VPN modern dashboard
 ```
 
@@ -119,8 +119,8 @@ d:\JunWRT\stock_rootfs\
 ### A. Pre-Render Zero-Flicker Initialization
 Located in `usr/lib/lua/luci/view/themes/argon/header.htm`:
 ```html
-<link rel="stylesheet" href="<%=media%>/css/cascade.css?v=2.4.3">
-<link rel="stylesheet" id="argon-dark-css" href="<%=media%>/css/dark.css?v=2.4.3" media="none">
+<link rel="stylesheet" href="<%=media%>/css/cascade.css?v=2.4.4">
+<link rel="stylesheet" id="argon-dark-css" href="<%=media%>/css/dark.css?v=2.4.8" media="none">
 <script>
     (function() {
         try {

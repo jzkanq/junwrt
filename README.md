@@ -95,3 +95,11 @@ If your router does not have internet access, you can download install_webui_onl
 ```sh
 sh /tmp/install_webui_only.sh
 ```
+
+---
+
+## Dark Mode Surface Repair (WebUI Assets Only)
+
+Dark-mode and PassWall 2 surface fixes are included in the existing `install_webui_only.sh`, so users can keep using the same download command and filename. The script packages the updated Argon theme, modem styles, PassWall 2 stylesheet, and its view references alongside the existing JunWRT WebUI bundle. It runs the installer’s normal JunWRT suite setup and does not flash firmware.
+
+After installation, hard-refresh LuCI with **Ctrl + Shift + R** (or **Cmd + Shift + R** on macOS).

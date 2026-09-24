@@ -41,7 +41,7 @@ When working in this workspace or modifying the AW1000 OpenWrt firmware and inst
 
 ## 6. Automated Verification Gate
 * Always run `python d:\JunWRT\verify_junwrt.py` and `deep_audit.py` before marking builds or installers complete.
-* Firmware must pass 100% of checks (69 in `verify_junwrt.py`, 37 in `deep_audit.py`) with 0 failures and 0 warnings.
+* Require 100% of checks reported by the current audit scripts to pass, with 0 failures and 0 warnings. Check totals can change as the suites evolve; the 2026-09-24 run reported 82 checks in `verify_junwrt.py` and 42 in `deep_audit.py`. Update this note when the scripts report new totals.
 
 ## 7. JunWRT Modern Hardware Appliance Design System
 Whenever improving, modernizing, or refactoring LuCI WebUI pages, status modules, or custom forms:
@@ -93,7 +93,9 @@ Whenever improving, modernizing, or refactoring LuCI WebUI pages, status modules
 ## 9. WebUI Change Notes & Surface Audit
 * For every implementation change, review and refine this `AGENTS.md` in the same change so its rules stay current and contradictions are removed.
 * For every LuCI visual change, search active UI sources for white background declarations and confirm they are either Light Mode styles or have an effective Dark Mode override. Record the result with the change.
+* For every LuCI JavaScript view change, run `node --check` on each changed module and verify the generated installer contains the corrected source before release.
 * Cockpit theme change note (2026-09-24): added a separate `Standard` / `Signal & Antenna` choice in JunWRT Settings, persisted per browser and applied only to Cellular Baseband Cockpit. The alternate design uses graphite surfaces in both global modes. Audit found its white action-button text is on solid high-contrast action buttons; no white card or page background is used by the alternate cockpit surface.
+* JunWRT Settings syntax fix (2026-09-24): the cockpit-choice `Array.map()` renderer had an extra closing square bracket after the mapped expression, preventing the entire settings view from parsing. Keep the renderer closure balanced and run `node --check` for this view before building its installer payload.
 * The modem cockpit CSS is duplicated inside `cellscan.js`, `sim.js`, `lockband.js`, `imei.js`, `atdebug.js`, and `sms.js`; keep those Dark Mode rules aligned with the shared `3ginfo-white.css` / `3ginfo-lite.css` styles. The APN, TTL, and JunWRT Settings views use `.ginfo-page` rules, including `junwrt-settings.css`.
 * Wi-Fi overview change note (2026-09-24): refreshed `stock_rootfs/usr/lib/lua/luci/view/admin_mtk/mtk_wifi_overview.htm` with flatter radio/network sections, quieter labels, and left-aligned responsive controls; synchronized `WinSCP_Deploy_Modem/mtk_wifi_overview.htm`. Surface audit found the active white and pale fills belong to Light Mode cards, forms, and status/alert states; matching Dark Mode selectors replace them with graphite surfaces. White text remains limited to high-contrast actions. Existing form IDs/names, LuCI URLs, controller actions, and JavaScript handlers were preserved. Both templates have LF line endings; authenticated live rendering was unavailable at the router login screen.
 * Keep `README.md`, the handover guide, audit rules, and installer messages mode-accurate: white is Light Mode styling and Dark Mode uses the graphite tokens above.

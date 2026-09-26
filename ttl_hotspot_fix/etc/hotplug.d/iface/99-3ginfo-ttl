@@ -1,0 +1,9 @@
+#!/bin/sh
+
+case "$ACTION:$INTERFACE" in
+	ifup:wan|ifup:wan6|ifdown:wan|ifdown:wan6)
+		/etc/init.d/3ginfo_ttl reload
+		;;
+esac
+
+exit 0

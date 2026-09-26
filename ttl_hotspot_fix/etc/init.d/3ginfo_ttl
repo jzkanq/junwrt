@@ -1,0 +1,141 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+STOP=13
+
+remove_tagged_rules()
+{
+	local tool="$1"
+	local chain="$2"
+	local tag="$3"
+	local rule_number
+
+	command -v "$tool" >/dev/null 2>&1 || return 0
+	while :; do
+		rule_number="$("$tool" -t mangle -S "$chain" 2>/dev/null | awk -v marker="$tag" -v target_chain="$chain" '
+			$1 == "-A" && $2 == target_chain {
+				number++
+				if (index($0, marker)) {
+					print number
+					exit
+				}
+			}')"
+		[ -n "$rule_number" ] || break
+		"$tool" -t mangle -D "$chain" "$rule_number" 2>/dev/null || break
+	done
+}
+
+remove_owned_rules()
+{
+	local chain
+	local tag
+
+	for chain in FORWARD POSTROUTING; do
+		for tag in 3ginfo_ttl JunWRT_TTL JunWRT_TTL_WAN; do
+			remove_tagged_rules iptables "$chain" "$tag"
+			remove_tagged_rules ip6tables "$chain" "$tag"
+		done
+	done
+}
+
+get_wan_device()
+{
+	local iface
+	local device
+
+	for iface in wan wan6; do
+		device="$(ifstatus "$iface" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null | head -n 1)"
+		case "$device" in
+			''|br-lan|lo|*[!A-Za-z0-9_.-]*) continue ;;
+		esac
+		printf '%s\n' "$device"
+		return 0
+	done
+	return 1
+}
+
+apply_rules()
+{
+	local enabled
+	local ttl
+	local wan_device
+
+	remove_owned_rules
+
+	enabled="$(uci -q get 3ginfo_ttl.main.enable 2>/dev/null)"
+	[ -n "$enabled" ] || enabled=0
+	[ "$enabled" = 1 ] || return 0
+
+	ttl="$(uci -q get 3ginfo_ttl.main.ttl 2>/dev/null)"
+	case "$ttl" in
+		''|*[!0-9]*|????*) ttl=64 ;;
+	esac
+	[ "$ttl" -ge 1 ] 2>/dev/null && [ "$ttl" -le 255 ] 2>/dev/null || ttl=64
+
+	wan_device="$(get_wan_device)"
+	if [ -z "$wan_device" ]; then
+		logger -t 3ginfo_ttl 'TTL rewrite enabled, but no active WAN layer-3 device was found.'
+		return 0
+	fi
+
+	if command -v iptables >/dev/null 2>&1; then
+		iptables -t mangle -A FORWARD -i br-lan -o "$wan_device" -m comment --comment JunWRT_TTL_WAN -j TTL --ttl-set "$ttl" || \
+			logger -t 3ginfo_ttl "Could not set IPv4 TTL on $wan_device."
+	else
+		logger -t 3ginfo_ttl 'iptables is unavailable; IPv4 TTL was not changed.'
+	fi
+
+	if command -v ip6tables >/dev/null 2>&1; then
+		ip6tables -t mangle -A FORWARD -i br-lan -o "$wan_device" -m comment --comment JunWRT_TTL_WAN -j HL --hl-set 64 || \
+			logger -t 3ginfo_ttl "Could not set IPv6 Hop Limit on $wan_device."
+	else
+		logger -t 3ginfo_ttl 'ip6tables is unavailable; IPv6 Hop Limit was not changed.'
+	fi
+
+	logger -t 3ginfo_ttl "Applied IPv4 TTL $ttl and IPv6 Hop Limit 64 on cellular WAN device $wan_device."
+}
+
+ensure_firewall_hook()
+{
+	mkdir -p /etc/firewall.d || return 1
+	cat > /etc/firewall.d/3ginfo_ttl <<'EOF'
+#!/bin/sh
+. /etc/init.d/3ginfo_ttl || exit 1
+apply_rules
+EOF
+	chmod 0755 /etc/firewall.d/3ginfo_ttl || return 1
+
+	if [ "$(uci -q get firewall.3ginfo_ttl.type 2>/dev/null)" != script ] || \
+	   [ "$(uci -q get firewall.3ginfo_ttl.path 2>/dev/null)" != /etc/firewall.d/3ginfo_ttl ] || \
+	   [ "$(uci -q get firewall.3ginfo_ttl.family 2>/dev/null)" != any ] || \
+	   [ "$(uci -q get firewall.3ginfo_ttl.reload 2>/dev/null)" != 1 ]; then
+		uci -q set firewall.3ginfo_ttl=include || return 1
+		uci -q set firewall.3ginfo_ttl.type=script || return 1
+		uci -q set firewall.3ginfo_ttl.path=/etc/firewall.d/3ginfo_ttl || return 1
+		uci -q set firewall.3ginfo_ttl.family=any || return 1
+		uci -q set firewall.3ginfo_ttl.reload=1 || return 1
+		uci -q commit firewall || return 1
+	fi
+
+	if ! uci -q show ucitrack 2>/dev/null | grep -F ".init='3ginfo_ttl'" >/dev/null 2>&1; then
+		uci -q add ucitrack 3ginfo_ttl >/dev/null 2>&1 &&
+		uci -q set 'ucitrack.@3ginfo_ttl[-1].init=3ginfo_ttl' &&
+		uci -q commit ucitrack || logger -t 3ginfo_ttl 'Could not register the UCI reload trigger.'
+	fi
+}
+
+start()
+{
+	ensure_firewall_hook || logger -t 3ginfo_ttl 'Could not install the firewall reload hook.'
+	apply_rules
+}
+
+stop()
+{
+	remove_owned_rules
+}
+
+reload()
+{
+	start
+}

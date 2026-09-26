@@ -1,13 +1,56 @@
 'use strict';
 'require view';
 'require poll';
-'require rpc';
+'require fs';
 'require ui';
 
-const callGetStatus = rpc.declare({ object: 'junwrt-adblock', method: 'get_status' });
-const callSaveSource = rpc.declare({ object: 'junwrt-adblock', method: 'save_source', params: ['source'] });
-const callUpdateNow = rpc.declare({ object: 'junwrt-adblock', method: 'update_now', params: ['source'] });
-const callSetEnabled = rpc.declare({ object: 'junwrt-adblock', method: 'set_enabled', params: ['enabled', 'source'] });
+function runCommand(args) {
+	/* Blocklist downloads can exceed LuCI's default 20-second RPC timeout. */
+	L.env.rpctimeout = Math.max(Number(L.env.rpctimeout) || 20, 150);
+	return fs.exec('/usr/bin/junwrt-adblock', args).then(function(result) {
+		if (Number(result?.code) !== 0)
+			throw new Error(String(result?.stdout || result?.stderr || _('Ad Blocker command failed.')).trim());
+		return result;
+	});
+}
+
+function callGetStatus() {
+	return runCommand(['status']).then(function(result) {
+		var data;
+		try {
+			data = JSON.parse(result.stdout);
+		} catch (e) {
+			throw new Error(_('Ad Blocker returned invalid status data.'));
+		}
+		var enabled = Number(data?.enabled);
+		var active = Number(data?.active);
+		var domains = Number(data?.domains);
+		if ((enabled !== 0 && enabled !== 1) || (active !== 0 && active !== 1) || !isFinite(domains) || domains < 0)
+			throw new Error(_('Ad Blocker returned invalid status data.'));
+		data.enabled = enabled === 1;
+		data.active = active === 1;
+		data.domains = domains;
+		return data;
+	});
+}
+
+function runAction(args) {
+	return runCommand(args).then(function(result) {
+		return { message: String(result.stdout || '').trim() };
+	});
+}
+
+function callSaveSource(source) {
+	return runAction(['save-source', source]);
+}
+
+function callUpdateNow(source) {
+	return runAction(source ? ['update', source] : ['update']);
+}
+
+function callSetEnabled(enabled, source) {
+	return runAction(enabled ? (source ? ['enable', source] : ['enable']) : ['disable']);
+}
 const DEFAULT_SOURCE = 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts';
 var statusPollFn = null;
 
@@ -130,7 +173,7 @@ return view.extend({
 			return performAction(function() {
 				return callSetEnabled(enable, sourceInput.value.trim());
 			}, enable ? _('Preparing the blocklist and enabling DNS ad blocking…') : _('Disabling DNS ad blocking…'), enable ? _('DNS ad blocking enabled.') : _('DNS ad blocking disabled.'), function(data) {
-				return (!!data?.enabled) == enable ? null : enable ? _('The command finished, but ad blocking is still disabled.') : _('The command finished, but ad blocking is still enabled.');
+				return (!!data?.enabled) == enable ? null : _('Ad Blocker status still reports enabled=%s after the command.').format(data?.enabled ? '1' : '0');
 			});
 		});
 

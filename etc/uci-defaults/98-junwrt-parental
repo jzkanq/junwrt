@@ -1,0 +1,4 @@
+#!/bin/sh
+/etc/init.d/junwrt-parental enable || exit 1
+/etc/init.d/junwrt-parental start || exit 1
+exit 0

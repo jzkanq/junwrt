@@ -1,0 +1,46 @@
+.jun-parental-page { color: #1e293b; max-width: 1100px; margin: 0 auto; }
+.jun-parental-page h1 { font-size: 24px; font-weight: 600; color: #0f172a; }
+.jun-parental-page h2 { font-size: 18px; font-weight: 600; margin: 0 0 16px; }
+.jun-parental-page h3 { font-size: 14px; font-weight: 600; margin: 20px 0 12px; }
+.jun-parental-page .pc-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 22px; margin: 20px 0; box-shadow: 0 1px 3px rgba(15,23,42,.04), 0 4px 12px rgba(15,23,42,.03); }
+.jun-parental-page .pc-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.jun-parental-page .pc-field { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.jun-parental-page .pc-field > span { font-size: 12px; font-weight: 600; }
+.jun-parental-page input:not([type=checkbox]), .jun-parental-page select { box-sizing: border-box; width: 100%; max-width: none; min-height: 44px; border: 1px solid #cbd5e1; border-radius: 6px; background: #ffffff; color: #1e293b; padding: 8px 12px; }
+.jun-parental-page input:focus, .jun-parental-page select:focus { outline: 2px solid #0284c7; outline-offset: 2px; }
+.jun-parental-page input[type=checkbox] { accent-color: #0284c7; margin: 0 8px 0 0; }
+.jun-parental-page .pc-check, .jun-parental-page .pc-day { display: flex; align-items: center; min-height: 44px; }
+.jun-parental-page .pc-days { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.jun-parental-page .pc-help, .jun-parental-page small { color: #64748b; font-size: 12px; line-height: 1.6; }
+.jun-parental-page .pc-device { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-bottom: 1px solid #e2e8f0; }
+.jun-parental-page .pc-device:last-child { border-bottom: 0; }
+.jun-parental-page .pc-device h3 { margin: 0 0 6px; }
+.jun-parental-page .pc-mac { font: 600 12px ui-monospace,Consolas,monospace; overflow-wrap: anywhere; }
+.jun-parental-page .pc-device-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+.jun-parental-page .pc-state { color: #334155; font-size: 12px; }
+.jun-parental-page .pc-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.jun-parental-page .pc-button { border-radius: 6px !important; font-size: 12px !important; font-weight: 600 !important; padding: 6px 14px !important; min-height: 44px; cursor: pointer; }
+.jun-parental-page .pc-primary { background: #0284c7 !important; color: #ffffff !important; border: 1px solid #0284c7; }
+.jun-parental-page .pc-primary:hover { background: #0369a1 !important; }
+.jun-parental-page .pc-secondary { background: #ffffff !important; color: #334155 !important; border: 1px solid #cbd5e1; }
+.jun-parental-page .pc-secondary:hover { background: #f1f5f9 !important; }
+.jun-parental-page .pc-danger { background: #ef4444 !important; color: #ffffff !important; border: 1px solid #ef4444; }
+.jun-parental-page .pc-danger:hover { background: #dc2626 !important; }
+.jun-parental-page .pc-button:disabled { opacity: .6; cursor: wait; }
+.jun-parental-page .pc-warning, .jun-parental-page .pc-message.is-error { border-left: 3px solid #f59e0b; padding: 12px; background: #f8fafc; color: #92400e; font-size: 12px; }
+html[data-theme=dark] .jun-parental-page { color: #e8eaed; }
+html[data-theme=dark] .jun-parental-page h1, html[data-theme=dark] .jun-parental-page h2, html[data-theme=dark] .jun-parental-page h3 { color: #e8eaed; }
+html[data-theme=dark] .jun-parental-page .pc-card { background: #292a2d; border-color: #3f4044; box-shadow: none; }
+html[data-theme=dark] .jun-parental-page input:not([type=checkbox]), html[data-theme=dark] .jun-parental-page select { background: #35363a; border-color: #5a5d63; color: #e8eaed; }
+html[data-theme=dark] .jun-parental-page .pc-help, html[data-theme=dark] .jun-parental-page small { color: #9aa0a6; }
+html[data-theme=dark] .jun-parental-page .pc-device { border-color: #3f4044; }
+html[data-theme=dark] .jun-parental-page .pc-state { color: #c4c7cc; }
+html[data-theme=dark] .jun-parental-page .pc-secondary { background: #35363a !important; color: #e8eaed !important; border-color: #5a5d63; }
+html[data-theme=dark] .jun-parental-page .pc-secondary:hover { background: #3f4044 !important; }
+html[data-theme=dark] .jun-parental-page .pc-warning, html[data-theme=dark] .jun-parental-page .pc-message.is-error { background: #35363a; color: #fbbf24; }
+@media(max-width:600px) {
+    .jun-parental-page .pc-card { padding: 16px; }
+    .jun-parental-page .pc-grid { grid-template-columns: 1fr; gap: 0; }
+    .jun-parental-page .pc-device { align-items: flex-start; flex-direction: column; }
+    .jun-parental-page .pc-device-actions { align-items: flex-start; }
+}

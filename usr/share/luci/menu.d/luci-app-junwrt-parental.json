@@ -1,0 +1,8 @@
+{
+  "admin/modem/parental-control": {
+    "title": "Parental Control",
+    "order": 55,
+    "action": { "type": "view", "path": "modem/parental_control" },
+    "depends": { "acl": [ "luci-app-junwrt-parental" ] }
+  }
+}

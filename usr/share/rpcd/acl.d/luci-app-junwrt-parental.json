@@ -1,0 +1,16 @@
+{
+  "luci-app-junwrt-parental": {
+    "description": "Manage per-device JunWRT parental controls",
+    "read": {
+      "ubus": { "file": [ "exec" ] },
+      "file": { "/usr/bin/junwrt-parental status": [ "exec" ] }
+    },
+    "write": {
+      "ubus": { "file": [ "exec" ] },
+      "file": {
+        "/usr/bin/junwrt-parental save *": [ "exec" ],
+        "/usr/bin/junwrt-parental delete *": [ "exec" ]
+      }
+    }
+  }
+}

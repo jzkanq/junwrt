@@ -11,6 +11,7 @@ When working in this workspace or modifying the AW1000 OpenWrt firmware and inst
   - `/etc/config/wireless` UCI configurations
   - `/etc/uci-defaults/99-junwrt-setup` first-boot automation
   - `install_junwrt.sh` deployment script
+* **Stock firmware 160 MHz trial (2026-09-27)**: keep the stock 5 GHz profile at 80 MHz by default. The separate `stock_160_trial/` overlay is based on the original `stock.tar` LuCI view/controller, reveals the existing 160 MHz selector, maps it to `VHT_BW=2`, and limits MT6890/AW1000 operation to two TX/RX streams at 160 MHz. Returning from 160 restores four streams when the selectors are unchanged. This trial is not part of the JunWRT deployment by default; live radio/DFS/client negotiation still needs verification.
 
 ## 2. WebUI & Modem Cockpit Architecture
 * **Cockpit Dashboard (`3gdetail.js`)**:
@@ -38,11 +39,10 @@ When working in this workspace or modifying the AW1000 OpenWrt firmware and inst
 * Keep generic OpenWrt `flow_offloading` disabled in `/etc/config/firewall` (enables `mtk_warp.ko` hardware NAT and avoids stalls in WireGuard, OpenVPN, Passwall, and OpenClash).
 * Enforce TCP MSS clamping on the FORWARD chain in `/etc/firewall.user` with idempotency checks.
 * Dynamic CPU frequency scaling (energy-saving idle + 2.0 GHz burst) and 4-core IRQ packet steering managed by `/etc/init.d/junspeedpatch`.
-* The TTL page controls IPv4 TTL on client traffic forwarded from `br-lan` to the active cellular WAN; IPv6 Hop Limit remains fixed at 64 for the hotspot workaround. Preserve LAN Router Advertisements at outer Hop Limit 255, remove duplicate legacy rules idempotently, and keep hardware acceleration enabled. Keep the rootfs service, WAN hotplug hook, build source, and WinSCP deployment copies synchronized.
 
 ## 6. Automated Verification Gate
 * Always run `python d:\JunWRT\verify_junwrt.py` and `deep_audit.py` before marking builds or installers complete.
-* Require 100% of checks reported by the current audit scripts to pass, with 0 failures and 0 warnings. Check totals can change as the suites evolve; the 2026-09-26 run reports 84 checks in `verify_junwrt.py` and 44 in `deep_audit.py`. Update this note when the scripts report new totals.
+* Require 100% of checks reported by the current audit scripts to pass, with 0 failures and 0 warnings. Check totals can change as the suites evolve; the 2026-10-02 run reports 89 checks in `verify_junwrt.py` and 49 in `deep_audit.py`. Update this note when the scripts report new totals.
 
 ## 7. JunWRT Modern Hardware Appliance Design System
 Whenever improving, modernizing, or refactoring LuCI WebUI pages, status modules, or custom forms:
@@ -113,7 +113,6 @@ Whenever improving, modernizing, or refactoring LuCI WebUI pages, status modules
 * PassWall 2 sub-page follow-up (2026-09-24): the internal Node List and rule-node editor exposed pale latency links and white custom dropdown displays after the initial route sweep. Dark-only rules in `passwall2-modern.css` and its cache-renamed copy, `passwall2-modern-v2.css`, make the links and dropdowns graphite, retain readable status colors, and keep selected dropdown options sky blue. All four PassWall 2 views import the new static filename without a query string because the browser retained the old unversioned CSS after a hard reload. Test the open dropdown as well as the closed field; the WebUI installer updates the CSS and its view references. It allows the new cache-renamed stylesheet to be absent on first install, backs up every existing target, and records newly created files so its rollback helper removes them.
 * Keep `README.md`, the handover guide, audit rules, and installer messages mode-accurate: white is Light Mode styling and Dark Mode uses the graphite tokens above.
 * Tailscale runtime repair (2026-09-25): AW1000 runtime logs showed `/usr/sbin/tailscale` symlinked to a `tailscaled` build without the embedded CLI, while `tailscale0` itself was present. The WebUI installer and Tailscale hot-deployer must install a version-matched standalone ARM64 CLI as `/usr/bin/tailscale` from Tailscale's static archive, then use that path for status/login/settings. Keep the CLI bootstrap, helper, RPC backends, settings init service, generated installer payload, and hot-deployer synchronized. The helper waits for daemon readiness and passes auth keys/login-server values as argument vectors without `eval`; all shell sources must remain LF-only.
-* TTL hotspot bypass repair (2026-09-26): the previous global POSTROUTING Hop Limit rule changed LAN Router Advertisements from outer Hop Limit 255 to 64, which clients reject. The TTL service now sets the configurable IPv4 TTL and fixed IPv6 Hop Limit 64 only on client traffic forwarded from `br-lan` to the active cellular WAN, removes duplicate legacy rules in both FORWARD and POSTROUTING, and reapplies them after WAN ifup/ifdown and firewall reloads. Keep the TTL page, rootfs service, WAN hotplug hook, firmware builder, and WinSCP copies aligned. The targeted `WinSCP_Deploy_Modem/ttl_hotspot_fix` bundle backs up touched files and firewall/ucitrack config before applying the fix. Hardware acceleration remains enabled; do not apply Hop Limit mangling to `br-lan`.
 
 * Combined installer integration (2026-09-26): the canonical WebUI installer ships the same TTL service and WAN hotplug hook as the targeted hotspot bundle, backs up affected TTL and firewall files, then enables and reloads the service. The ttl_hotspot_fix/install.sh runs the sibling install_webui_only.sh when present; pass --ttl-only for the standalone deployment. Keep the WebUI installer, generator, Git deploy copy, and WinSCP package synchronized.
 
@@ -132,3 +131,11 @@ Whenever improving, modernizing, or refactoring LuCI WebUI pages, status modules
 
 ## 11. Git Push Workflow
 * When a push is requested, run `git push` from PowerShell outside the sandbox using `sandbox_permissions: require_escalated`, so the host's configured GitHub credentials are available. Check the target branch and intended commit first, then verify `origin` advanced and the local working tree is clean. Do not copy credentials or tokens into commands.
+
+## 12. Per-device Parental Control (2026-10-02)
+* Keep `Modem → Parental Control`, its restricted file-exec ACL, Lua CLI/policy, procd service, hotplug and first-boot scripts synchronized with firmware and installer sources. Preserve `junwrt-parental` UCI profiles on upgrade; no managed devices ship by default.
+* Identify devices by stable unicast MAC and validate all fields in the backend. Child/Teen use CleanBrowsing Family/Adult DNS; time-only applies no filter. Do not describe them as individual-app permissions, complete content protection or daily quotas.
+* Schedules use router-local time, selected start days for overnight windows and exclusive end times; evaluate every five seconds. Early-boot invalid clocks fail closed for schedules. Keep IPv4/IPv6 rules before established-session acceptance, preserve DHCP/DNS/LuCI and recover owned chains after firewall restarts.
+* Force filtered TCP/UDP IPv4 DNS to the fixed resolver, block port 853 and disable forwarded IPv6 only for filtered clients. Explain HTTPS DNS/VPN/MAC bypasses. Preserve global dnsmasq and offload defaults.
+* Hardware NAT requires a live acceptance test with existing streams at the schedule boundary. Display the `mtk_warp` warning; never equate installed rules with verified accelerated-traffic enforcement. See `PARENTAL_CONTROL.md` for deployment limits and acceptance tests.
+* Surface audit: new white cards/inputs/secondary buttons and pale notices have explicit graphite Dark Mode overrides. Use the static stylesheet filename. Run JS syntax checks, actual Lua policy tests and both audits; new installer checks require rootfs/WinSCP/Git byte identity and LF-only assets.

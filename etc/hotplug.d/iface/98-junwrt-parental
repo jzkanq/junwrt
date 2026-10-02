@@ -1,0 +1,4 @@
+#!/bin/sh
+case "$ACTION" in
+    ifup|ifupdate) touch /var/run/junwrt-parental.reload ;;
+esac

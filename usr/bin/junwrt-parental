@@ -1,0 +1,157 @@
+#!/usr/bin/lua
+local json = require 'luci.jsonc'
+local uci = require 'uci'
+local fs = require 'nixio.fs'
+local nixio = require 'nixio'
+local util = require 'luci.util'
+local policy = require 'junwrt_parental'
+local config = 'junwrt-parental'
+local statefile = '/var/run/junwrt-parental.json'
+local function output(data) io.write(json.stringify(data) .. '\n') end
+local function fail(message) output({ error = message }); os.exit(1) end
+local function run(cmd) return os.execute(cmd .. ' >/dev/null 2>&1') == 0 end
+local function profiles()
+    local cursor, out = uci.cursor(), {}
+    if not fs.access('/etc/config/' .. config) then return out end
+    if not cursor:load(config) then error('Could not load parental configuration.') end
+    cursor:foreach(config, 'device', function(raw)
+        local p, err = policy.validate(raw)
+        if not p then error(err) end
+        local now = os.date('*t')
+        p.allowed = policy.allowed(p, now.wday - 1, now.hour * 60 + now.min, now.year >= 2025)
+        out[#out + 1] = p
+    end)
+    table.sort(out, function(a, b) return a.mac < b.mac end)
+    return out
+end
+local function signature(list)
+    return json.stringify(list)
+end
+local function status()
+    local list = profiles()
+    local installed = json.parse(fs.readfile(statefile) or '{}') or {}
+    local devices, known = {}, {}
+    for line in (fs.readfile('/tmp/dhcp.leases') or ''):gmatch('[^\n]+') do
+        local mac, ip, name = line:match('^%S+ (%S+) (%S+) (%S+)')
+        if mac then
+            mac = mac:upper()
+            known[mac] = true
+            devices[#devices + 1] = { mac = mac, ip = ip, name = name ~= '*' and name or ip }
+        end
+    end
+    return { profiles = list, devices = devices, router_time = os.date('%Y-%m-%d %H:%M:%S %Z'),
+        clock_ok = tonumber(os.date('%Y')) >= 2025, applied = installed.signature == signature(list),
+        enforcement_error = installed.error, last_apply = installed.time,
+        hardware_offload = fs.readfile('/proc/modules') and (fs.readfile('/proc/modules'):find('mtk_warp ', 1, true) ~= nil) or false }
+end
+local function save(raw)
+    local p, err = policy.validate(json.parse(raw or '') or {})
+    if not p then fail(err) end
+    local list = profiles()
+    if #list >= 64 then
+        local found = false
+        for _, existing in ipairs(list) do if existing.id == p.id then found = true end end
+        if not found then fail('Maximum 64 managed devices.') end
+    end
+    local c = uci.cursor()
+    if not fs.access('/etc/config/' .. config) then
+        if not fs.writefile('/etc/config/' .. config, '') then fail('Could not create configuration.') end
+    end
+    if not c:load(config) then fail('Could not load configuration.') end
+    if not c:get(config, p.id) and not c:section(config, 'device', p.id) then
+        fail('Could not create profile.')
+    end
+    for _, k in ipairs({ 'mac', 'name', 'level', 'enabled', 'schedule', 'days', 'start', 'finish' }) do
+        if not c:set(config, p.id, k, p[k]) then fail('Could not save profile field: ' .. k) end
+    end
+    if not c:save(config) or not c:commit(config) then fail('Could not save profile.') end
+    output({ success = true })
+end
+local function anchor(tool, tab, parent, child)
+    local cmd = tool .. ' -w 5 -t ' .. tab
+    -- Insert before established-session ACCEPT and VPN DNS redirection rules.
+    local first = io.popen(cmd .. ' -S ' .. parent .. ' 2>/dev/null')
+    local rules = first and first:read('*a') or ''
+    if first then first:close() end
+    local top = rules:match('%-A [^\n]+')
+    if top == '-A ' .. parent .. ' -j ' .. child then return true end
+    while run(cmd .. ' -C ' .. parent .. ' -j ' .. child) do
+        if not run(cmd .. ' -D ' .. parent .. ' -j ' .. child) then return false end
+    end
+    return run(cmd .. ' -I ' .. parent .. ' 1 -j ' .. child)
+end
+local function apply(list)
+    local v4, v6, dns = policy.rules(list)
+    for _, item in ipairs({ { 'iptables-restore', v4 }, { 'ip6tables-restore', v6 }, { 'iptables-restore', dns } }) do
+        local path = '/var/run/junwrt-parental.rules'
+        if not fs.writefile(path, item[2]) or not run(item[1] .. ' -w 5 --noflush < ' .. path) then
+            fs.remove(path)
+            return nil, 'Firewall apply failed: ' .. item[1]
+        end
+        fs.remove(path)
+    end
+    for _, item in ipairs({
+        { 'iptables', 'filter', 'FORWARD', 'JUN_PC_F' }, { 'ip6tables', 'filter', 'FORWARD', 'JUN_PC_F' },
+        { 'iptables', 'filter', 'INPUT', 'JUN_PC_I' }, { 'ip6tables', 'filter', 'INPUT', 'JUN_PC_I' },
+        { 'iptables', 'nat', 'PREROUTING', 'JUN_PC_DNS' }
+    }) do
+        if not anchor(unpack(item)) then return nil, 'Could not attach parental firewall chain.' end
+    end
+    -- If installed, remove this client's existing IPv4 sessions on a policy change.
+    -- Never flush other clients' sessions. Hardware NAT still needs a live acceptance test.
+    if fs.access('/usr/sbin/conntrack') then
+        local leases = fs.readfile('/tmp/dhcp.leases') or ''
+        for _, p in ipairs(list) do
+            for line in leases:gmatch('[^\n]+') do
+                local mac, ip = line:match('^%S+ (%S+) (%S+)')
+                if mac and mac:upper() == p.mac and ip:match('^%d+%.%d+%.%d+%.%d+$') then
+                    run('/usr/sbin/conntrack -D -s ' .. util.shellquote(ip))
+                end
+            end
+        end
+    end
+    return true
+end
+local function daemon()
+    local previous
+    while true do
+        local ok, list = pcall(profiles)
+        local problem
+        if ok then
+            local key = signature(list)
+            local attached = anchor('iptables', 'filter', 'FORWARD', 'JUN_PC_F') and
+                anchor('ip6tables', 'filter', 'FORWARD', 'JUN_PC_F') and
+                anchor('iptables', 'nat', 'PREROUTING', 'JUN_PC_DNS') and
+                anchor('iptables', 'filter', 'INPUT', 'JUN_PC_I') and
+                anchor('ip6tables', 'filter', 'INPUT', 'JUN_PC_I')
+            if key ~= previous or not attached or fs.access('/var/run/junwrt-parental.reload') then
+                fs.remove('/var/run/junwrt-parental.reload')
+                local success, err = apply(list)
+                if success then
+                    previous = key
+                    fs.writefile(statefile, json.stringify({ signature = key, time = os.date('%Y-%m-%d %H:%M:%S') }))
+                else problem = err end
+            end
+        else problem = tostring(list) end
+        if problem then
+            previous = nil
+            fs.writefile(statefile, json.stringify({ error = problem }))
+        end
+        nixio.nanosleep(5)
+    end
+end
+local command = arg[1]
+local ok, err = pcall(function()
+    if command == 'status' then output(status())
+    elseif command == 'save' then save(arg[2])
+    elseif command == 'delete' then
+        if not (arg[2] or ''):match('^pc%x%x%x%x%x%x%x%x%x%x%x%x$') then fail('Invalid profile ID.') end
+        local c = uci.cursor()
+        if not c:load(config) then fail('Could not load configuration.') end
+        if c:get(config, arg[2]) and not c:delete(config, arg[2]) then fail('Could not delete profile.') end
+        if not c:save(config) or not c:commit(config) then fail('Could not delete profile.') end
+        output({ success = true })
+    elseif command == 'daemon' then daemon()
+    else fail('Use status, save, delete or daemon.') end
+end)
+if not ok then fail(tostring(err)) end

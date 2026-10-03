@@ -6,13 +6,13 @@
 
 var refreshPoll;
 var levels = {
-    child: _('Child · suggested age 6–12'),
-    teen: _('Teen · suggested age 13–17'),
+    child: _('Child (6–12 years)'),
+    teen: _('Teen (13–17 years)'),
     none: _('No content filter · time control only')
 };
 var descriptions = {
-    child: _('CleanBrowsing Family: blocks adult and mixed adult sites, known proxy/VPN domains and security threats; enables supported safe search. Games and social apps are not generally blocked.'),
-    teen: _('CleanBrowsing Adult: blocks adult sites and security threats. Mixed-content sites, games and social apps remain available.'),
+    child: _('Blocks adult and mixed-content sites, known proxy/VPN domains and security threats. Enables supported safe search.'),
+    teen: _('Blocks adult sites and security threats. Mixed-content sites remain available.'),
     none: _('No DNS content filtering. The internet schedule still applies when enabled.')
 };
 function command(args) {
@@ -51,6 +51,7 @@ return view.extend({
         var busy = false;
         var current = data;
         var selectedId = null;
+        var managedCard;
         var search = E('input', { type: 'search', placeholder: _('Find a device or MAC address'), 'aria-label': _('Find a managed device') });
 
         function updateStatus(value) {
@@ -85,20 +86,21 @@ return view.extend({
         }
         function drawList() {
             list.replaceChildren();
+            search.hidden = !(current.profiles || []).length;
             var query = search.value.trim().toLowerCase();
             var profiles = (current.profiles || []).filter(function(p) {
                 return (p.name + ' ' + p.mac).toLowerCase().indexOf(query) !== -1;
             });
             if (!profiles.length) {
-                list.appendChild(E('p', { 'class': 'pc-help' }, query ? _('No matching devices.') : _('No managed devices yet. Add a device below.')));
+                list.appendChild(E('p', { 'class': 'pc-empty' }, query ? _('No matching devices.') : _('No devices added yet. Choose a device below to get started.')));
                 return;
             }
             profiles.forEach(function(p) {
                 var device = (current.devices || []).find(function(d) { return d.mac === p.mac; });
                 var state = p.enabled !== '1' ? _('Control disabled') : !current.applied ? _('Pending apply') : p.allowed ? _('Internet allowed') : _('Internet blocked');
-                var edit = E('button', { type: 'button', 'class': 'pc-button pc-secondary', disabled: busy ? 'disabled' : null }, _('Edit'));
+                var edit = E('button', { type: 'button', 'class': 'pc-button pc-secondary cbi-button-neutral', disabled: busy ? 'disabled' : null }, _('Edit'));
                 edit.addEventListener('click', function() { showEditor(p); editor.scrollIntoView({ block: 'nearest' }); });
-                var remove = E('button', { type: 'button', 'class': 'pc-button pc-danger', disabled: busy ? 'disabled' : null }, _('Remove'));
+                var remove = E('button', { type: 'button', 'class': 'pc-button pc-danger cbi-button-remove', disabled: busy ? 'disabled' : null }, _('Remove'));
                 remove.addEventListener('click', function() {
                     ui.showModal(_('Remove device control?'), [
                         E('p', {}, _('Remove the internet schedule and content filter for %s?').format(p.name)),
@@ -116,7 +118,7 @@ return view.extend({
                         E('p', { 'class': 'pc-help' }, levels[p.level]),
                         E('p', { 'class': 'pc-help' }, p.schedule === '1' ?
                             _('Allowed %s–%s · %s').format(p.start, p.finish, p.days.split('').map(function(d) { return [_('Sun'), _('Mon'), _('Tue'), _('Wed'), _('Thu'), _('Fri'), _('Sat')][Number(d)]; }).join(', ')) : _('All-day access'))]),
-                    E('div', { 'class': 'pc-device-actions' }, [E('span', { 'class': 'pc-state' }, state), E('div', { 'class': 'pc-actions' }, [edit, remove])])
+                    E('div', { 'class': 'pc-device-actions' }, [E('span', { 'class': 'pc-state' + (p.enabled === '1' && current.applied ? (p.allowed ? ' is-allowed' : ' is-blocked') : '') }, state), E('div', { 'class': 'pc-actions' }, [edit, remove])])
                 ]));
             });
         }
@@ -142,27 +144,43 @@ return view.extend({
             var finish = E('input', { type: 'time', value: p.finish, required: 'required' });
             var days = [_('Sun'), _('Mon'), _('Tue'), _('Wed'), _('Thu'), _('Fri'), _('Sat')].map(function(label, i) {
                 var box = E('input', { type: 'checkbox', value: String(i), checked: p.days.indexOf(String(i)) !== -1 ? 'checked' : null });
-                return { box: box, label: E('label', { 'class': 'pc-day' }, [box, label]) };
+                return { box: box, label: E('label', { 'class': 'pc-day' }, [box, E('span', {}, label)]) };
             });
-            var timing = E('div', {}, [E('div', { 'class': 'pc-days' }, days.map(function(d) { return d.label; })),
-                E('div', { 'class': 'pc-grid' }, [field(_('Internet available from'), start), field(_('Internet available until'), finish)])]);
+            var presets = E('div', { 'class': 'pc-presets' }, [
+                ['Every day', '0123456'], ['Weekdays', '12345'], ['Weekend', '06']
+            ].map(function(choice) {
+                return E('button', { type: 'button', 'class': 'pc-preset', click: function() {
+                    days.forEach(function(d) { d.box.checked = choice[1].indexOf(d.box.value) !== -1; });
+                } }, _(choice[0]));
+            }));
+            var timing = E('div', { 'class': 'pc-timing' }, [presets, E('div', { 'class': 'pc-days' }, days.map(function(d) { return d.label; })),
+                E('div', { 'class': 'pc-grid' }, [field(_('From'), start), field(_('Until'), finish)])]);
             function toggleTime() {
                 timing.querySelectorAll('input').forEach(function(input) { input.disabled = !schedule.checked; });
+                timing.querySelectorAll('button').forEach(function(button) { button.disabled = !schedule.checked; });
+                timing.hidden = !schedule.checked;
             }
             schedule.addEventListener('change', toggleTime);
             toggleTime();
-            var save = E('button', { type: 'submit', 'class': 'pc-button pc-primary' }, _('Save device'));
+            var save = E('button', { type: 'submit', 'class': 'pc-button pc-primary cbi-button-save' }, profile ? _('Save changes') : _('Add device'));
+            function section(title, description, children) {
+                return E('section', { 'class': 'pc-form-section' }, [
+                    E('div', { 'class': 'pc-section-heading' }, [E('h3', {}, title), E('p', { 'class': 'pc-help' }, description)]),
+                    E('div', { 'class': 'pc-section-body' }, children)
+                ]);
+            }
             var form = E('form', {}, [
-                E('h3', {}, _('Basic info')),
-                profile ? '' : field(_('Device on this router'), devices),
-                E('div', { 'class': 'pc-grid' }, [field(_('Device / child name'), name), field(_('Device MAC address'), mac)]),
-                E('label', { 'class': 'pc-check' }, [enabled, _('Enable control for this device')]),
-                E('h3', {}, _('Filter level')), field(_('Age / protection level'), level), levelHelp,
-                E('h3', {}, _('Time control')),
-                E('label', { 'class': 'pc-check' }, [schedule, _('Allow internet only during this schedule')]), timing,
-                E('p', { 'class': 'pc-help' }, _('Outside the selected window, Wi-Fi stays connected but internet forwarding is blocked. Times use the router clock. For overnight windows, select the day the window starts.')),
-                E('div', { 'class': 'pc-actions' }, [save,
-                    E('button', { type: 'button', 'class': 'pc-button pc-secondary', click: function() { showEditor(); } }, _('New device'))])
+                section(_('Basic info'), _('Choose the device you want to manage.'), [
+                    profile ? '' : field(_('Connected device'), devices),
+                    E('div', { 'class': 'pc-grid' }, [field(_('Device / child name'), name), field(_('MAC address'), mac)]),
+                    E('label', { 'class': 'pc-check' }, [enabled, _('Enable device control')])]),
+                section(_('Filter level'), _('Choose a suitable content filter.'), [field(_('Protection level'), level), levelHelp,
+                    E('p', { 'class': 'pc-help' }, _('Age ranges are suggestions. Games and social apps are not generally blocked.'))]),
+                section(_('Time control'), _('Set when this device can go online.'), [
+                    E('label', { 'class': 'pc-check' }, [schedule, _('Use an internet schedule')]), timing,
+                    E('p', { 'class': 'pc-help' }, _('Wi-Fi stays connected outside allowed hours. Times follow the router clock; overnight hours start on the selected day.'))]),
+                E('div', { 'class': 'pc-form-footer pc-actions' }, [save,
+                    E('button', { type: 'button', 'class': 'pc-button pc-secondary cbi-button-neutral', click: function() { showEditor(); } }, profile ? _('Cancel editing') : _('Reset form'))])
             ]);
             form.addEventListener('submit', function(event) {
                 event.preventDefault();
@@ -179,19 +197,21 @@ return view.extend({
                     return;
                 }
                 action(['save', JSON.stringify({ name: name.value.trim(), mac: mac.value.trim(), enabled: enabled.checked ? '1' : '0',
-                    level: level.value, schedule: schedule.checked ? '1' : '0', days: selectedDays, start: start.value, finish: finish.value })]);
+                    level: level.value, schedule: schedule.checked ? '1' : '0', days: selectedDays, start: start.value, finish: finish.value })], function() { showEditor(); });
             });
-            editor.appendChild(E('h2', {}, profile ? _('Edit device') : _('Add a device')));
+            editor.appendChild(E('div', { 'class': 'pc-card-heading' }, E('h2', {}, profile ? _('Edit device') : _('Add a device'))));
             editor.appendChild(form);
+            editor.appendChild(message);
         }
         search.addEventListener('input', drawList);
-        root.appendChild(E('link', { rel: 'stylesheet', href: L.resource('view/modem/parental-control.css') }));
+        root.appendChild(E('link', { rel: 'stylesheet', href: L.resource('view/modem/parental-control-v2.css') }));
         root.appendChild(E('header', {}, [E('h1', {}, _('Parental Control')),
             E('p', { 'class': 'pc-help' }, _('Manage which device your child uses, its content filter and when it can access the internet.')), summary, warning]));
-        root.appendChild(E('section', { 'class': 'pc-card' }, [E('h2', {}, _('Managed devices')), search, list]));
+        managedCard = E('section', { 'class': 'pc-card pc-managed' }, [E('h2', {}, _('Managed devices')), search, list]);
+        root.appendChild(managedCard);
         root.appendChild(editor);
-        root.appendChild(message);
-        root.appendChild(E('p', { 'class': 'pc-help' }, _('Use a stable MAC address for this Wi-Fi network. A changed/random MAC, mobile data, VPN or HTTPS private DNS can bypass these controls. Filtering forces plain IPv4 DNS to CleanBrowsing, blocks port 853 and disables forwarded IPv6 for filtered devices. It does not control individual apps or daily usage quotas.')));
+        root.appendChild(E('details', { 'class': 'pc-details' }, [E('summary', {}, _('How filtering works and its limits')),
+            E('p', { 'class': 'pc-help' }, _('Use a stable MAC address for this Wi-Fi network. A changed/random MAC, mobile data, VPN or HTTPS private DNS can bypass these controls. Filtering forces plain IPv4 DNS to CleanBrowsing, blocks port 853 and disables forwarded IPv6 for filtered devices. It does not control individual apps or daily usage quotas.'))]));
         updateStatus(data);
         showEditor();
         if (refreshPoll) poll.remove(refreshPoll);

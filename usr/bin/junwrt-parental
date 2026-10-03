@@ -58,7 +58,8 @@ local function save(raw)
         if not fs.writefile('/etc/config/' .. config, '') then fail('Could not create configuration.') end
     end
     if not c:load(config) then fail('Could not load configuration.') end
-    if not c:get(config, p.id) and not c:section(config, 'device', p.id) then
+    -- Native libuci has set(config, section, type), not LuCI's section() helper.
+    if not c:get(config, p.id) and not c:set(config, p.id, 'device') then
         fail('Could not create profile.')
     end
     for _, k in ipairs({ 'mac', 'name', 'level', 'enabled', 'schedule', 'days', 'start', 'finish' }) do

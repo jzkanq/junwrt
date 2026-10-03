@@ -1,5 +1,9 @@
 # JunWRT WebUI & Universal Dark Mode Architecture: Codex Handover & Improvement Guide
 
+Parental Control (2026-10-02): the Modem tab now has an opt-in device/profile/schedule page, backed by the validated Lua CLI and a procd firewall service. Keep the policy, ACL, menu, service and generated installer/deployment copies synchronized. White Light Mode surfaces have graphite Dark Mode overrides. See [PARENTAL_CONTROL.md](PARENTAL_CONTROL.md) for DNS limitations and required AW1000 hardware NAT acceptance testing; installer inclusion is verified separately from the existing firmware image.
+
+The save/UI follow-up uses native UCI `set(config, id, type)` rather than the unavailable `section()` helper. Preserve the complete CLI regression. The form uses readable label/content sections and day presets; page specificity plus CBI action classes protects action contrast under the late dark stylesheet. The imported static `parental-control-v2.css` must stay identical to the original stylesheet and ship in both installers. Local browser previews passed desktop Dark and mobile Light checks with the real Argon CSS; authenticated router rendering has not been verified.
+
 This document is the authoritative engineering specification and context guide for OpenAI Codex (or other AI coding agents) to understand, maintain, refactor, and improve the **JunWRT WebUI Suite** on the **Arcadyan AW1000 Ultra** 5G CPE Router.
 
 ---
@@ -13,7 +17,7 @@ This document is the authoritative engineering specification and context guide f
 * **Operating System**: **OpenWrt 19.07.7** (`r11306-c4a6851c72`, target `mt6890/evb6890v1_64_cpe`).
 * **Firewall Framework**: OpenWrt **`fw3` (iptables)** with `/etc/firewall.user` hooks (NOTE: This is NOT `fw4`/nftables).
 * **Web Management Engine**: LuCI WebUI (client-side JavaScript MVC architecture, adapted/backported from LuCI modern branch) powered by `uhttpd` and `rpcd`.
-* **Primary Theme**: Heavily customized `luci-theme-argon` with the **Modern Hardware Appliance Design System**, white Light Mode surfaces, and neutral graphite Dark Mode.
+* **Primary Theme**: Heavily customized `luci-theme-argon` with the **Modern Hardware Appliance Design System** and a **neutral graphite dark mode**.
 
 ---
 
@@ -42,9 +46,13 @@ Codex must strictly follow these rules under all circumstances:
    * It immediately sets `data-theme="dark"` and `.dark-mode` on `document.documentElement` before the DOM renders to prevent any white-flash flicker (FOUC).
 
 6. **Neutral Graphite Dark Palette**:
-   * In Dark Mode, use page `#202124`, cards `#292a2d`, elevated surfaces `#35363a`, borders `#3f4044` / `#5a5d63`, and soft neutral text `#e8eaed` / `#c4c7cc` / `#9aa0a6`.
-   * Blue is reserved for primary actions and restrained focus/link accents; it must not tint the overall shell.
-   * In Light Mode, white (`#ffffff`) modem surfaces remain supported with slate borders (`#e2e8f0`).
+   * In Dark Mode:
+     - Page and shell surfaces use `#202124`; cards use `#292a2d`; elevated controls use `#35363a`.
+     - Subtle and strong borders use `#3f4044` and `#5a5d63`.
+     - Primary, secondary, and muted text use `#e8eaed`, `#c4c7cc`, and `#9aa0a6`.
+     - Blue (`#0284c7`) is reserved for primary actions and restrained links or focus accents.
+   * In Light Mode:
+     - Modem sub-pages and cards use pure white (`#ffffff`) with subtle slate borders (`#e2e8f0`).
 
 7. **Wi-Fi SSID Invariant**:
    * 2.4 GHz SSID: `JunWRT 2.4G`
@@ -96,7 +104,7 @@ d:\JunWRT\stock_rootfs\
         └── view\
             ├── modem\
             │   ├── 3gdetail.js       <- 27KB Real-Time Baseband Cockpit
-            │   ├── 3ginfo-white.css  <- Light-white / dark-graphite appliance stylesheet
+            │   ├── 3ginfo-white.css  <- Pure white / neutral graphite modern appliance stylesheet
             │   ├── 3ginfo-lite.css   <- Synchronized clone of 3ginfo-white.css
             │   ├── junwrt_settings.js<- Theme selector (Light / Dark / Auto) & Telemetry
             │   ├── cellscan.js       <- Modern Cell Scan & Neighboring PCI Lock
@@ -108,7 +116,7 @@ d:\JunWRT\stock_rootfs\
             │   ├── atdebug.js        <- AT command interactive terminal
             │   └── sms.js            <- SMS messaging client & modern table
             ├── passwall2\
-            │   └── passwall2-modern-v2.css <- Cache-renewed PassWall 2 styles with Dark Mode dropdown fixes
+            │   └── passwall2-modern.css <- Dark mode compatible PassWall 2 styles
             └── tailscale.js          <- Tailscale mesh VPN modern dashboard
 ```
 
@@ -119,8 +127,8 @@ d:\JunWRT\stock_rootfs\
 ### A. Pre-Render Zero-Flicker Initialization
 Located in `usr/lib/lua/luci/view/themes/argon/header.htm`:
 ```html
-<link rel="stylesheet" href="<%=media%>/css/cascade.css?v=2.4.4">
-<link rel="stylesheet" id="argon-dark-css" href="<%=media%>/css/dark.css?v=2.4.8" media="none">
+<link rel="stylesheet" href="<%=media%>/css/cascade.css?v=2.4.3">
+<link rel="stylesheet" id="argon-dark-css" href="<%=media%>/css/dark.css?v=2.4.3" media="none">
 <script>
     (function() {
         try {
@@ -146,7 +154,7 @@ Located in `usr/lib/lua/luci/view/themes/argon/header.htm`:
     })();
 </script>
 ```
-* **Why this matters**: In stock themes, JavaScript runs late after `<body>` is painted, causing a white flash. Our implementation runs synchronously in `<head>`, ensuring the first frame uses the selected theme.
+* **Why this matters**: In stock themes, JavaScript runs late after `<body>` is painted, causing a white flash. Our implementation runs synchronously in `<head>`, so the browser applies the selected graphite or light palette before the first paint.
 
 ### B. Navigation Bar Theme Toggle
 * **Element**: `<button id="junwrt-theme-toggle" class="jun-theme-btn">` inside `header.htm`.
@@ -214,7 +222,8 @@ Codex should focus on the following high-value improvements while maintaining al
   - `--jw-border-strong`: `#cbd5e1` (light) / `#5a5d63` (dark)
   - `--jw-text-primary`: `#0f172a` (light) / `#e8eaed` (dark)
   - `--jw-text-secondary`: `#64748b` (light) / `#c4c7cc` (dark)
-  - `--jw-accent`: `#0284c7` (both) / `--jw-accent-hover`: `#0369a1`
+  - `--jw-text-muted`: `#94a3b8` (light) / `#9aa0a6` (dark)
+  - `--jw-accent`: `#0284c7` / `--jw-accent-hover`: `#0369a1`
 * Clean up duplicate override rules without breaking specificity.
 
 ### 2. High-DPI & Mobile (<768px) Responsive Ergonomics
@@ -251,10 +260,12 @@ CRITICAL INVARIANTS:
 3. Do NOT generate or run any .bin firmware build commands. WebUI is deployed via install_webui_only.sh.
 4. Preserve the 27KB Cockpit Dashboard in 3gdetail.js (do not regress or overwrite with 50KB stock version).
 5. Preserve the zero-flicker pre-render script in header.htm.
-6. In Dark Mode, use the neutral graphite palette in `AGENTS.md`; white surfaces are Light Mode only. In Light Mode, preserve pure white (#ffffff) appliance styling.
+6. In Dark Mode, use neutral graphite surfaces (#202124 page, #292a2d cards, #35363a elevated controls, #3f4044 borders). In Light Mode, preserve pure white (#ffffff) appliance styling.
 7. After editing files in stock_rootfs, build install_webui_only.sh with `python d:\JunWRT\tools\build_install_webui_sh.py` and commit/push to git in `d:\JunWRT\github_repo`.
 
 Login background note (2026-09-24): the Argon login template keeps `#202124` as its dark fallback but must not suppress `background-image` on `.login-page`; the saved graphite, slate, steel, mist, and custom image choices must still render in Dark Mode. `verify_junwrt.py` and `deep_audit.py` inspect the embedded login template in the canonical installer so the WebUI-only release gate covers the file users will install without rebuilding firmware.
+
+Router-shared wallpaper update (2026-09-27): preset selection and allowlisted image MIME type are stored in router UCI config, and all clients read the shared setting. Custom images are validated at upload and their bytes stay only at `/tmp/wpic`; the public `/cgi-bin/junwrt-wallpaper` CGI reads the approved MIME value from UCI and serves with `Cache-Control: no-store`, avoiding browser caching and shell format detection. Header and controller Lua validation backfill MIME metadata for an existing `/tmp/wpic` after upgrade. Upload and delete actions remain behind authenticated LuCI routes. The mode survives router reboot, while the image clears with volatile `/tmp`. The settings view, controller, CGI, header, and installer payload are checked together by both audit scripts.
 
 TASK:
 [Insert your specific task here: e.g. refactor CSS variables, polish mobile layout, improve AT debug terminal, etc.]

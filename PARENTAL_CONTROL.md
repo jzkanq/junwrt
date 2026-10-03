@@ -25,4 +25,6 @@ HTTPS private DNS, VPNs, router proxies on permitted management ports, changed M
 
 ## Validation
 
+Save/UI repair (2026-10-02): named profiles now use the native UCI `set(config, section, type)` API. The CLI regression covers create/read/edit/delete and failed writes. The page has separate Basic info / Filter level / Time control rows, day presets, larger text, high-contrast actions and feedback beside the form. Its static `parental-control-v2.css` filename avoids the old browser cache. Desktop Dark and mobile Light were reviewed locally with the real Argon cascade; the preview uses simulated device data and does not establish router enforcement.
+
 `tools/test_parental_control.py` executes the actual policy with Lua 5.1 via the local `lupa` test dependency. Both firmware gates check the canonical installer, deployment-copy identity, LF endings, menu/ACL and JS syntax. White card/input/secondary surfaces and pale notices have explicit graphite Dark Mode overrides; white action-button text is intentional. Existing views and global theme assets are unchanged.

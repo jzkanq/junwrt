@@ -277,6 +277,7 @@ history_json() {
 		}
 		NF == 21 {
 			out = ""
+			sep = ""
 			for (i = 1; i <= 21; i++) {
 				v = $i
 				if (kind[i] == "n") {
@@ -285,14 +286,17 @@ history_json() {
 					gsub(/["\\\r]/, "", v)
 					v = "\"" v "\""
 				}
-				out = out (i > 1 ? "," : "") "\"" key[i] "\":" v
+				# BusyBox awk reads "name (" as a function call, so never put "(" after a variable.
+				out = out sep "\"" key[i] "\":" v
+				sep = ","
 			}
-			printf "%s{%s}", (count++ ? "," : ""), out
+			if (count++) printf ","
+			printf "{%s}", out
 		}' "$HISTORY"
 }
 
 status() {
-	local running=0 phase="" started=0 error=""
+	local running=0 phase="" started=0 error="" results
 	if is_running; then
 		running=1
 		[ -f "$STATE" ] && read -r phase started < "$STATE"
@@ -300,10 +304,9 @@ status() {
 	case "$started" in ''|*[!0-9]*) started=0 ;; esac
 	phase="$(clean "$phase")"
 	[ "$running" = 1 ] || error="$(clean "$(cat "$ERROR_FILE" 2>/dev/null)")"
-	printf '{"running":%s,"phase":"%s","started":%s,"now":%s,"error":"%s","results":[' \
-		"$running" "$phase" "$started" "$(date +%s)" "$error"
-	history_json
-	printf ']}\n'
+	results="$(history_json)" || { results=""; error="Could not read the speed test history."; }
+	printf '{"running":%s,"phase":"%s","started":%s,"now":%s,"error":"%s","results":[%s]}\n' \
+		"$running" "$phase" "$started" "$(date +%s)" "$error" "$results"
 }
 
 towers() {

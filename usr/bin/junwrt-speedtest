@@ -1,0 +1,318 @@
+#!/bin/sh
+# JunWRT router-side speed test that records the serving cell with each result.
+
+ROOT="${JUNWRT_SPEEDTEST_ROOT:-}" # test hook: prefix for the paths below
+DATA_DIR="$ROOT/etc/junwrt-speedtest"
+RUN_DIR="$ROOT/var/run/junwrt-speedtest"
+MODEM_INFO="$ROOT/usr/share/3ginfo-lite/3ginfo.sh"
+HISTORY="$DATA_DIR/history"
+LOCK="$RUN_DIR/lock"
+STATE="$RUN_DIR/state"
+ERROR_FILE="$RUN_DIR/error"
+# Plain HTTP keeps the router's mbedTLS encryption cost out of the result; only test data is sent.
+BASE_URL="http://speed.cloudflare.com"
+STREAMS=4
+WINDOW=10
+# Cloudflare refuses single downloads of 100 MB or more.
+DOWN_BYTES=50000000
+UP_MAX_BLOCKS=150
+MAX_HISTORY=50
+TAB="$(printf '\t')"
+
+fail() {
+	echo "$1"
+	return 1
+}
+
+abort() {
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	echo "$1" > "$ERROR_FILE"
+	fail "$1"
+}
+
+clean() {
+	local value
+	value="$(printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-96)"
+	[ "$value" = "-" ] && value=""
+	printf '%s' "$value"
+}
+
+number() {
+	printf '%s\n' "$1" | awk 'match($0, /-?(0|[1-9][0-9]*)(\.[0-9]+)?/) { print substr($0, RSTART, RLENGTH); exit }'
+}
+
+# Per-antenna readings such as "-95 dBm | -97 dBm"; 0 and 255 mark unused receivers.
+average() {
+	printf '%s\n' "$1" | awk '{
+		while (match($0, /-?(0|[1-9][0-9]*)(\.[0-9]+)?/)) {
+			v = substr($0, RSTART, RLENGTH) + 0
+			if (v != 0 && v != 255) { sum += v; n++ }
+			$0 = substr($0, RSTART + RLENGTH)
+		}
+	} END { if (n) printf "%.1f", sum / n }'
+}
+
+is_running() {
+	[ -f "$LOCK" ] || return 1
+	command -v flock >/dev/null 2>&1 || return 1
+	flock -n "$LOCK" true 2>/dev/null && return 1
+	return 0
+}
+
+take_lock() {
+	command -v flock >/dev/null 2>&1 || { fail "flock is not available."; return 1; }
+	mkdir -p "$RUN_DIR" || { fail "Cannot create the speed test state directory."; return 1; }
+	exec 9>"$LOCK" || { fail "Cannot open the speed test lock."; return 1; }
+	flock -n 9 || { fail "A speed test is already running."; return 1; }
+	rm -f "$ERROR_FILE"
+}
+
+phase() {
+	echo "$1 $STARTED" > "$STATE"
+	echo "$2"
+}
+
+modem_field() {
+	jsonfilter -s "$MODEM_JSON" -e "@.$1" 2>/dev/null
+}
+
+read_cell() {
+	MODEM_JSON=""
+	if [ -x "$MODEM_INFO" ]; then
+		if command -v timeout >/dev/null 2>&1; then
+			MODEM_JSON="$(timeout 30 "$MODEM_INFO" json 2>/dev/null)"
+		else
+			MODEM_JSON="$("$MODEM_INFO" json 2>/dev/null)"
+		fi
+	fi
+	OPERATOR="$(clean "$(modem_field operator_name)")"
+	MODE="$(clean "$(modem_field mode)")"
+	PBAND="$(clean "$(modem_field pband)")"
+	PCI="$(number "$(modem_field pci)")"
+	EARFCN="$(number "$(modem_field earfcn)")"
+	CID="$(number "$(modem_field cid_dec)")"
+	RSRP="$(number "$(modem_field rsrp)")"
+	RSRQ="$(number "$(modem_field rsrq)")"
+	SINR="$(number "$(modem_field sinr)")"
+	S1BAND="$(clean "$(modem_field s1band)")"
+	S1PCI=""
+	S1RSRP=""
+	S1SINR=""
+	if [ -n "$S1BAND" ]; then
+		S1PCI="$(number "$(modem_field s1pci)")"
+		S1RSRP="$(average "$(modem_field s1rsrp)")"
+		S1SINR="$(average "$(modem_field s1sinr)")"
+	fi
+}
+
+server_colo() {
+	curl -s --connect-timeout 5 --max-time 8 "$BASE_URL/cdn-cgi/trace" 2>/dev/null |
+		sed -n 's/^colo=\([A-Z][A-Z][A-Z]\)$/\1/p' | head -n 1
+}
+
+# Prints "<median ms> <jitter ms>" from TCP connect times; the first sample warms DNS.
+measure_latency() {
+	local i=0
+	: > "$RUN_DIR/latency"
+	while [ "$i" -lt 6 ]; do
+		curl -s -o /dev/null --connect-timeout 5 --max-time 8 \
+			-w '%{http_code} %{time_namelookup} %{time_connect}\n' \
+			"$BASE_URL/__down?bytes=0" >> "$RUN_DIR/latency" 2>/dev/null
+		i=$((i + 1))
+	done
+	awk 'NR > 1 && $1 == 200 && $3 > $2 { v[++n] = ($3 - $2) * 1000 }
+	END {
+		if (!n) exit 1
+		for (i = 2; i <= n; i++) { d = v[i] - v[i - 1]; jitter += d < 0 ? -d : d }
+		if (n > 1) jitter /= n - 1
+		for (i = 2; i <= n; i++) {
+			x = v[i]
+			for (k = i - 1; k >= 1 && v[k] > x; k--) v[k + 1] = v[k]
+			v[k + 1] = x
+		}
+		median = n % 2 ? v[(n + 1) / 2] : (v[n / 2] + v[n / 2 + 1]) / 2
+		printf "%.1f %.1f\n", median, jitter
+	}' "$RUN_DIR/latency"
+}
+
+# Prints the number of 100 kB blocks each upload stream needs for an ~8 second test.
+upload_blocks() {
+	dd if=/dev/zero bs=100000 count=10 2>/dev/null |
+		curl -s -o /dev/null --connect-timeout 5 --max-time 15 -X POST \
+			-H 'Content-Type: application/octet-stream' -T - \
+			-w '%{http_code} %{size_upload} %{time_pretransfer} %{time_total}\n' \
+			"$BASE_URL/__up" 2>/dev/null |
+		awk -v max="$UP_MAX_BLOCKS" '$1 == 200 && $2 > 0 && $4 > $3 {
+			blocks = int($2 / ($4 - $3) * 2 / 100000)
+			print (blocks < 1 ? 1 : (blocks > max ? max : blocks))
+			found = 1
+		} END { if (!found) exit 1 }'
+}
+
+# Prints "<Mbps> <bytes> <server ip>" for parallel streams. Downloads count every byte
+# received; uploads count only server-confirmed requests, so unsent buffered data is excluded.
+measure() {
+	local n=0
+	rm -f "$RUN_DIR"/stream.*
+	while [ "$n" -lt "$STREAMS" ]; do
+		if [ "$1" = down ]; then
+			curl -s -o /dev/null --connect-timeout 5 --max-time "$WINDOW" \
+				-w '%{http_code} %{size_download} %{time_pretransfer} %{time_total} %{remote_ip}\n' \
+				"$BASE_URL/__down?bytes=$DOWN_BYTES" > "$RUN_DIR/stream.$n" 2>/dev/null &
+		else
+			dd if=/dev/zero bs=100000 count="$2" 2>/dev/null |
+				curl -s -o /dev/null --connect-timeout 5 --max-time $((WINDOW + 5)) -X POST \
+					-H 'Content-Type: application/octet-stream' -T - \
+					-w '%{http_code} %{size_upload} %{time_pretransfer} %{time_total} %{remote_ip}\n' \
+					"$BASE_URL/__up" > "$RUN_DIR/stream.$n" 2>/dev/null &
+		fi
+		n=$((n + 1))
+	done
+	wait
+	cat "$RUN_DIR"/stream.* 2>/dev/null | awk '$1 == 200 && $2 > 0 && $4 > $3 {
+		bytes += $2
+		if ($4 - $3 > span) span = $4 - $3
+		if (ip == "") ip = $5
+	} END {
+		if (bytes < 100000 || span <= 0) exit 1
+		printf "%.1f %d %s\n", bytes * 8 / span / 1000000, bytes, ip
+	}'
+}
+
+save_result() {
+	local tmp="$HISTORY.tmp"
+	mkdir -p "$DATA_DIR" || return 1
+	{
+		[ -f "$HISTORY" ] && awk -F '\t' 'NF == 21' "$HISTORY" | tail -n $((MAX_HISTORY - 1))
+		printf '%s\t' "$(date +%s)" "$DOWN" "$UP" "$LATENCY" "$JITTER" "$DATA_MB" "$SERVER" "$IPVER" \
+			"$OPERATOR" "$MODE" "$PBAND" "$PCI" "$EARFCN" "$CID" "$RSRP" "$RSRQ" "$SINR" "$S1BAND" "$S1PCI" "$S1RSRP"
+		printf '%s\n' "$S1SINR"
+	} > "$tmp" && mv -f "$tmp" "$HISTORY"
+}
+
+run_test() {
+	local result blocks ip
+	if [ "${1:-}" != "--locked" ]; then
+		take_lock || return 1
+	fi
+	STARTED=""
+	[ -f "$STATE" ] && read -r _ STARTED < "$STATE"
+	case "$STARTED" in ''|*[!0-9]*) STARTED="$(date +%s)" ;; esac
+	trap 'rm -f "$RUN_DIR"/stream.* "$RUN_DIR/latency" "$STATE"' EXIT
+	trap 'abort "The speed test was interrupted."; exit 1' INT TERM
+	command -v curl >/dev/null 2>&1 || { abort "curl is not installed."; return 1; }
+
+	phase cell "Reading the serving cell..."
+	read_cell
+	SERVER="$(server_colo)"
+
+	phase latency "Measuring latency..."
+	result="$(measure_latency)" || { abort "Could not reach the speed test server."; return 1; }
+	set -- $result
+	LATENCY="$1"
+	JITTER="$2"
+
+	phase download "Measuring download ($STREAMS connections, up to $WINDOW s)..."
+	result="$(measure down)" || { abort "The download test failed."; return 1; }
+	set -- $result
+	DOWN="$1"
+	DOWN_TOTAL="$2"
+	ip="$3"
+
+	phase upload "Measuring upload ($STREAMS connections)..."
+	blocks="$(upload_blocks)" || { abort "The upload test failed."; return 1; }
+	result="$(measure up "$blocks")" || { abort "The upload test failed."; return 1; }
+	set -- $result
+	UP="$1"
+	DATA_MB="$(awk -v d="$DOWN_TOTAL" -v u="$2" 'BEGIN { printf "%.1f", (d + u + 1000000) / 1000000 }')"
+	case "$ip" in
+		*:*) IPVER=6 ;;
+		'') IPVER="" ;;
+		*) IPVER=4 ;;
+	esac
+
+	phase saving "Saving the result..."
+	save_result || { abort "Could not save the speed test result."; return 1; }
+	echo "Download $DOWN Mbps, upload $UP Mbps, latency $LATENCY ms, jitter $JITTER ms"
+	echo "Server ${SERVER:-unknown}, IPv${IPVER:-?}, $DATA_MB MB used"
+	echo "Cell ${MODE:-unknown}, PCI ${PCI:--}, RSRP ${RSRP:--}, SINR ${SINR:--}"
+}
+
+start_test() {
+	take_lock || return 1
+	echo "starting $(date +%s)" > "$STATE"
+	# The test inherits the lock on descriptor 9 and holds it until it ends.
+	( trap '' HUP; "$0" run --locked > /dev/null 2>&1 < /dev/null & )
+	echo "Speed test started."
+}
+
+history_json() {
+	[ -s "$HISTORY" ] || return 0
+	awk -F '\t' '
+		BEGIN {
+			split("time down up latency jitter data_mb server ipver operator mode pband pci earfcn cid rsrp rsrq sinr s1band s1pci s1rsrp s1sinr", key, " ")
+			split("n n n n n n s n s s s n n n n n n s n n n", kind, " ")
+		}
+		NF == 21 {
+			out = ""
+			for (i = 1; i <= 21; i++) {
+				v = $i
+				if (kind[i] == "n") {
+					if (v !~ /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/) v = "null"
+				} else {
+					gsub(/["\\\r]/, "", v)
+					v = "\"" v "\""
+				}
+				out = out (i > 1 ? "," : "") "\"" key[i] "\":" v
+			}
+			printf "%s{%s}", (count++ ? "," : ""), out
+		}' "$HISTORY"
+}
+
+status() {
+	local running=0 phase="" started=0 error=""
+	if is_running; then
+		running=1
+		[ -f "$STATE" ] && read -r phase started < "$STATE"
+	fi
+	case "$started" in ''|*[!0-9]*) started=0 ;; esac
+	phase="$(clean "$phase")"
+	[ "$running" = 1 ] || error="$(clean "$(cat "$ERROR_FILE" 2>/dev/null)")"
+	printf '{"running":%s,"phase":"%s","started":%s,"now":%s,"error":"%s","results":[' \
+		"$running" "$phase" "$started" "$(date +%s)" "$error"
+	history_json
+	printf ']}\n'
+}
+
+towers() {
+	[ -s "$HISTORY" ] || { echo "No speed tests recorded yet."; return 0; }
+	awk -F '\t' 'function band(b) { sub(/ .*/, "", b); return b }
+	NF == 21 {
+		k = $11 == "" ? "Unknown cell" : band($11) " PCI " $12
+		if ($18 != "") k = k " + " band($18) " PCI " $19
+		n[k]++; d[k] += $2; u[k] += $3; l[k] += $4
+		if ($15 != "") { r[k] += $15; rn[k]++ }
+		if ($17 != "") { s[k] += $17; sn[k]++ }
+	} END {
+		for (k in n)
+			printf "%.1f\t%s\t%d\t%.1f\t%.1f\t%.1f\t%s\t%s\n", d[k] / n[k], k, n[k], d[k] / n[k], u[k] / n[k], l[k] / n[k],
+				rn[k] ? sprintf("%.1f", r[k] / rn[k]) : "-", sn[k] ? sprintf("%.1f", s[k] / sn[k]) : "-"
+	}' "$HISTORY" | sort -t "$TAB" -k1,1nr | awk -F '\t' '
+		BEGIN { printf "%-34s %5s %9s %9s %8s %7s %6s\n", "CELL (fastest first)", "TESTS", "DOWN", "UP", "LATENCY", "RSRP", "SINR" }
+		{ printf "%-34s %5s %9s %9s %8s %7s %6s\n", $2, $3, $4, $5, $6, $7, $8 }'
+}
+
+clear_history() {
+	is_running && { fail "Wait for the running speed test to finish."; return 1; }
+	rm -f "$HISTORY" || { fail "Could not clear the speed test history."; return 1; }
+	echo "Speed test history cleared."
+}
+
+case "${1:-}" in
+	run) run_test "${2:-}" ;;
+	start) start_test ;;
+	status) status ;;
+	towers) towers ;;
+	clear) clear_history ;;
+	*) echo "Usage: $0 {run|start|status|towers|clear}"; exit 2 ;;
+esac

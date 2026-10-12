@@ -60,6 +60,10 @@ JunWRT comes with built-in commercial machine-tied licensing:
   - Live signal gauges (RSRP, RSRQ, SINR, RSSI, CQI).
   - Carrier Aggregation (CA) band tracking (Primary + Secondary Component Carriers).
   - Cell ID, eNodeB / gNodeB, Bandwidth, and PCI live monitoring.
+* **📶 Speed Test & Tower Analyzer (Modem → Speed Test)**:
+  - Tests the router's own cellular link against the nearest Cloudflare server (download, upload, latency, jitter), so Wi-Fi does not affect the result.
+  - Saves each result with the serving cell (band, PCI, EARFCN, RSRP/SINR) and ranks cells by average speed; the router keeps the last 50 results.
+  - Runs only when started. Each test uses up to about 260 MB of mobile data. SSH: `junwrt-speedtest run`, `junwrt-speedtest towers`.
 * **🎨 Light / Dark Modern Hardware Appliance UI**:
   - Crisp white Light Mode and neutral graphite-gray Dark Mode across all modem sub-pages (Cell Scan, SIM, Band Lock, IMEI, APN, TTL, AT Debug, SMS).
   - High-contrast solid buttons and status badges.

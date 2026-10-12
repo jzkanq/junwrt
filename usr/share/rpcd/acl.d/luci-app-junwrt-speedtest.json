@@ -1,0 +1,16 @@
+{
+  "luci-app-junwrt-speedtest": {
+    "description": "Run JunWRT speed tests and view serving-cell history",
+    "read": {
+      "ubus": { "file": [ "exec" ] },
+      "file": { "/usr/bin/junwrt-speedtest status": [ "exec" ] }
+    },
+    "write": {
+      "ubus": { "file": [ "exec" ] },
+      "file": {
+        "/usr/bin/junwrt-speedtest start": [ "exec" ],
+        "/usr/bin/junwrt-speedtest clear": [ "exec" ]
+      }
+    }
+  }
+}

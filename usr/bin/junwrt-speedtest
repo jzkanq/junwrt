@@ -32,7 +32,7 @@ abort() {
 
 clean() {
 	local value
-	value="$(printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-96)"
+	value="$(printf '%s' "$1" | tr -d '\001-\037\042\134\177' | tr -s ' ' | cut -c1-96)"
 	[ "$value" = "-" ] && value=""
 	printf '%s' "$value"
 }
@@ -190,16 +190,23 @@ save_result() {
 	} > "$tmp" && mv -f "$tmp" "$HISTORY"
 }
 
+finish() {
+	rm -f "$RUN_DIR"/stream.* "$RUN_DIR/latency" "$STATE"
+	[ "$DONE" = 1 ] || [ -s "$ERROR_FILE" ] || echo "The speed test stopped unexpectedly." > "$ERROR_FILE"
+}
+
 run_test() {
 	local result blocks ip
-	if [ "${1:-}" != "--locked" ]; then
-		take_lock || return 1
+	if [ "${1:-}" = "--background" ]; then
+		mkdir -p "$RUN_DIR" && exec > "$RUN_DIR/log" 2>&1
 	fi
+	take_lock || return 1
+	DONE=0
 	STARTED=""
 	[ -f "$STATE" ] && read -r _ STARTED < "$STATE"
 	case "$STARTED" in ''|*[!0-9]*) STARTED="$(date +%s)" ;; esac
-	trap 'rm -f "$RUN_DIR"/stream.* "$RUN_DIR/latency" "$STATE"' EXIT
-	trap 'abort "The speed test was interrupted."; exit 1' INT TERM
+	trap finish EXIT
+	trap 'abort "The speed test was interrupted."; exit 1' HUP INT TERM
 	command -v curl >/dev/null 2>&1 || { abort "curl is not installed."; return 1; }
 
 	phase cell "Reading the serving cell..."
@@ -233,17 +240,32 @@ run_test() {
 
 	phase saving "Saving the result..."
 	save_result || { abort "Could not save the speed test result."; return 1; }
+	DONE=1
 	echo "Download $DOWN Mbps, upload $UP Mbps, latency $LATENCY ms, jitter $JITTER ms"
 	echo "Server ${SERVER:-unknown}, IPv${IPVER:-?}, $DATA_MB MB used"
 	echo "Cell ${MODE:-unknown}, PCI ${PCI:--}, RSRP ${RSRP:--}, SINR ${SINR:--}"
 }
 
 start_test() {
-	take_lock || return 1
+	local i=0
+	is_running && { fail "A speed test is already running."; return 1; }
+	mkdir -p "$RUN_DIR" || { fail "Cannot create the speed test state directory."; return 1; }
+	rm -f "$ERROR_FILE" "$RUN_DIR/log"
 	echo "starting $(date +%s)" > "$STATE"
-	# The test inherits the lock on descriptor 9 and holds it until it ends.
-	( trap '' HUP; "$0" run --locked > /dev/null 2>&1 < /dev/null & )
-	echo "Speed test started."
+	# A new session keeps the test independent of the caller (rpcd or SSH).
+	if command -v start-stop-daemon >/dev/null 2>&1; then
+		start-stop-daemon -S -b -x "$0" -- run --background || { fail "Could not start the speed test."; return 1; }
+	else
+		( "$0" run --background > /dev/null 2>&1 < /dev/null & )
+	fi
+	# Report success only once the test holds its lock, so status shows it running.
+	while [ "$i" -lt 10 ]; do
+		sleep 1
+		is_running && { echo "Speed test started."; return 0; }
+		[ -s "$ERROR_FILE" ] && { fail "$(cat "$ERROR_FILE")"; return 1; }
+		i=$((i + 1))
+	done
+	fail "The speed test did not start. $(tail -n 3 "$RUN_DIR/log" 2>/dev/null | tr '\n' ' ')"
 }
 
 history_json() {

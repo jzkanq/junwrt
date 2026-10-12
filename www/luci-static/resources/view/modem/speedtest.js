@@ -70,6 +70,10 @@ function groupCells(results) {
     }).sort(function(a, b) { return (b.down || 0) - (a.down || 0); });
 }
 
+function lastTime(results) {
+    return results.length ? Number(results[results.length - 1].time) || 0 : 0;
+}
+
 function when(epoch) {
     return new Date(Number(epoch) * 1000).toLocaleString();
 }
@@ -119,6 +123,7 @@ return view.extend({
         var current = data;
         var busy = false;
         var wasRunning = !!data.running;
+        var baseline = lastTime(data.results);
 
         function showMessage(text, isError) {
             message.textContent = text || '';
@@ -140,8 +145,10 @@ return view.extend({
                 showMessage(_('%s %s s elapsed.').format(phases[status.phase] || phases.starting, Math.max(0, status.now - status.started)));
             else if (status.error)
                 showMessage(status.error, true);
-            else if (wasRunning)
+            else if (wasRunning && lastTime(results) > baseline)
                 showMessage(_('Test complete.'));
+            else if (wasRunning)
+                showMessage(_('The test stopped without saving a result. Run junwrt-speedtest run over SSH for details.'), true);
             wasRunning = !!status.running;
             current = status;
             setButtons();
@@ -179,6 +186,7 @@ return view.extend({
         start.addEventListener('click', function() {
             if (busy || current.running) return;
             wasRunning = true;
+            baseline = lastTime(current.results);
             return action(['start'], _('Starting the test…'));
         });
         clear.addEventListener('click', function() {

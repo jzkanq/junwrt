@@ -37,9 +37,9 @@ Codex must strictly follow these rules under all circumstances:
    * Do NOT run `build_junwrt.py` or generate raw NAND flash images (`.bin`).
    * WebUI development and deployment is strictly handled via the standalone hot-deployer script: `install_webui_only.sh`.
 
-4. **Preserve Custom 27KB Cockpit Dashboard (`3gdetail.js`)**:
+4. **Preserve the Custom Cockpit Dashboard (`3gdetail.js`, about 40 KB with Standard and Signal Diagnostics layouts)**:
    * Never overwrite or regress `3gdetail.js` to the 50KB stock version.
-   * Preserve all underlying telemetry IDs (`j_stat_op`, `j_stat_mode`, `j_stat_sig`, `j_rx_pwr`, `j_pbar_1` to `j_pbar_4`, `j_scc1_block`, `j_scc2_block`, `j_ca_status`, etc.) and XHR endpoints.
+   * Preserve all underlying telemetry IDs (`j_stat_op`, `j_stat_mode`, `j_stat_sig`, `j_tx_pwr`, `j_pbar_1` to `j_pbar_4`, `j_scc1_block`, `j_scc2_block`, `j_ca_status`, Signal Diagnostics `j_radio_rsrp` and `j_radio_rx_val_0` to `j_radio_rx_val_3`, etc.) and XHR endpoints.
 
 5. **Zero-Flicker Dark Mode Pre-Render Architecture**:
    * The early `<script>` in `<head>` inside `header.htm` that checks `localStorage.getItem('junwrt_theme')` must be preserved.
@@ -103,7 +103,7 @@ d:\JunWRT\stock_rootfs\
         ├── menu-argon.js             <- Theme switcher click handler + live sync dispatcher
         └── view\
             ├── modem\
-            │   ├── 3gdetail.js       <- 27KB Real-Time Baseband Cockpit
+            │   ├── 3gdetail.js       <- ~40KB Real-Time Baseband Cockpit (Standard + Signal Diagnostics)
             │   ├── 3ginfo-white.css  <- Pure white / neutral graphite modern appliance stylesheet
             │   ├── 3ginfo-lite.css   <- Synchronized clone of 3ginfo-white.css
             │   ├── junwrt_settings.js<- Theme selector (Light / Dark / Auto) & Telemetry
@@ -127,8 +127,8 @@ d:\JunWRT\stock_rootfs\
 ### A. Pre-Render Zero-Flicker Initialization
 Located in `usr/lib/lua/luci/view/themes/argon/header.htm`:
 ```html
-<link rel="stylesheet" href="<%=media%>/css/cascade.css?v=2.4.3">
-<link rel="stylesheet" id="argon-dark-css" href="<%=media%>/css/dark.css?v=2.4.3" media="none">
+<link rel="stylesheet" href="<%=media%>/css/cascade.css?v=2.4.4">
+<link rel="stylesheet" id="argon-dark-css" href="<%=media%>/css/dark.css?v=2.4.8" media="none">
 <script>
     (function() {
         try {
@@ -180,7 +180,7 @@ Located in `usr/lib/lua/luci/view/themes/argon/header.htm`:
 ### The Hot-Deployer Script: `install_webui_only.sh`
 * Built by: `d:\JunWRT\tools\build_install_webui_sh.py`
 * What it does:
-  1. Compiles all 59 custom WebUI files into an in-memory tarball (`tar.gz`).
+  1. Compiles the custom WebUI files listed in the builder's `files` list (87 as of 2026-10-13) into an in-memory tarball (`tar.gz`).
   2. Ensures all text/script files have strict `\n` (0 CRLF).
   3. Base64-encodes the tarball directly into a standalone POSIX shell script.
   4. Automatically distributes the installer to:
@@ -258,7 +258,7 @@ CRITICAL INVARIANTS:
 1. Target OpenWrt 19.07.7 / fw3 (iptables). Never introduce fw4/nftables syntax.
 2. Every modified file must use strict Unix LF (\n) line endings (0 CRLF).
 3. Do NOT generate or run any .bin firmware build commands. WebUI is deployed via install_webui_only.sh.
-4. Preserve the 27KB Cockpit Dashboard in 3gdetail.js (do not regress or overwrite with 50KB stock version).
+4. Preserve the custom Cockpit Dashboard in 3gdetail.js (about 40 KB with Standard and Signal Diagnostics layouts; do not regress or overwrite with 50KB stock version).
 5. Preserve the zero-flicker pre-render script in header.htm.
 6. In Dark Mode, use neutral graphite surfaces (#202124 page, #292a2d cards, #35363a elevated controls, #3f4044 borders). In Light Mode, preserve pure white (#ffffff) appliance styling.
 7. After editing files in stock_rootfs, build install_webui_only.sh with `python d:\JunWRT\tools\build_install_webui_sh.py` and commit/push to git in `d:\JunWRT\github_repo`.

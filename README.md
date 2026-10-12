@@ -4,7 +4,7 @@
 [![Shell](https://img.shields.io/badge/Language-POSIX%20Shell-green.svg)](https://www.gnu.org/software/bash/)
 [![License](https://img.shields.io/badge/License-Commercial%20Proprietary-red.svg)](#activation--licensing)
 
-Modern, high-contrast, pure-white WebUI theme and real-time Cellular Cockpit for AW1000 5G OpenWrt routers.
+Modern, high-contrast WebUI theme (white Light Mode, graphite Dark Mode) and real-time Cellular Cockpit for AW1000 5G OpenWrt routers.
 
 ---
 

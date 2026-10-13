@@ -5,6 +5,7 @@
 'require ui';
 
 var refreshPoll;
+var SVG_NS = 'http://www.w3.org/2000/svg';
 var phases = {
     starting: _('Starting the test…'),
     cell: _('Reading the serving cell…'),
@@ -13,6 +14,17 @@ var phases = {
     upload: _('Measuring upload…'),
     saving: _('Saving the result…')
 };
+// The gauge labels sit at equal angles, so the scale is linear between labels and anything past the last one stays at the end.
+var SCALE = [0, 5, 10, 50, 100, 250, 500, 750, 1000];
+var ARC_START = 135, ARC_SWEEP = 270, NEEDLE_UP = 270, CX = 200, CY = 190, RADIUS = 150;
+var ICONS = {
+    ping: ['M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'M12 9v4l2.5 2', 'M9.5 2h5'],
+    down: ['M12 4v11', 'M7 11l5 5 5-5', 'M5 20h14'],
+    up: ['M12 20V9', 'M7 13l5-5 5 5', 'M5 4h14'],
+    server: ['M5 4h14a2 2 0 0 1 2 2v3H3V6a2 2 0 0 1 2-2z', 'M3 14h18v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', 'M7 6.5h.01', 'M7 17h.01'],
+    network: ['M5 20v-3', 'M10 20v-7', 'M15 20V9', 'M20 20V4']
+};
+var PHASE_METRIC = { latency: 'latency', download: 'down', upload: 'up' };
 
 function command(args) {
     return fs.exec('/usr/bin/junwrt-speedtest', args).then(function(result) {
@@ -99,29 +111,126 @@ function resultRow(title, subtitle, badge, item) {
     ]);
 }
 
+// SVG parts are created in the SVG namespace; colors come from the stylesheet so theme switches apply instantly.
+function svg(tag, attrs, children) {
+    var node = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function(key) { node.setAttribute(key, attrs[key]); });
+    (children || []).forEach(function(child) { node.appendChild(child); });
+    return node;
+}
+
+function paths(name) {
+    return ICONS[name].map(function(d) { return svg('path', { d: d }); });
+}
+
+function icon(name) {
+    return svg('svg', { 'class': 'st-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', focusable: 'false' }, paths(name));
+}
+
+function polar(degrees, radius) {
+    var rad = degrees * Math.PI / 180;
+    return [CX + radius * Math.cos(rad), CY + radius * Math.sin(rad)];
+}
+
+function fraction(mbps) {
+    var v = Math.max(0, Number(mbps) || 0), i = 1;
+    if (v >= SCALE[SCALE.length - 1]) return 1;
+    while (v > SCALE[i]) i++;
+    return (i - 1 + (v - SCALE[i - 1]) / (SCALE[i] - SCALE[i - 1])) / (SCALE.length - 1);
+}
+
+function gradient(id, from, to) {
+    return svg('linearGradient', { id: id, x1: 0, y1: 0, x2: 1, y2: 0 }, [
+        svg('stop', { 'class': from, offset: 0 }), svg('stop', { 'class': to, offset: 1 })]);
+}
+
+function buildGauge() {
+    var a = polar(ARC_START, RADIUS), b = polar(ARC_START + ARC_SWEEP, RADIUS);
+    var arc = 'M' + a[0].toFixed(2) + ' ' + a[1].toFixed(2) + ' A' + RADIUS + ' ' + RADIUS + ' 0 1 1 ' +
+        b[0].toFixed(2) + ' ' + b[1].toFixed(2);
+    var fill = svg('path', { 'class': 'st-arc st-fill', d: arc, pathLength: 100 });
+    var needle = svg('g', { 'class': 'st-needle' }, [
+        svg('path', { 'class': 'st-needle-body', d: 'M' + (CX - 5) + ' ' + CY + ' L' + CX + ' ' + (CY - 130) + ' L' + (CX + 5) + ' ' + CY + ' Z' }),
+        svg('circle', { 'class': 'st-hub', cx: CX, cy: CY, r: 11 })]);
+    var value = svg('text', { 'class': 'st-readout', x: CX, y: CY + 80 });
+    var unit = svg('text', { 'class': 'st-readout-unit', x: CX - 8, y: CY + 110 });
+    var ticks = SCALE.map(function(v, i) {
+        var p = polar(ARC_START + ARC_SWEEP * i / (SCALE.length - 1), RADIUS + 26);
+        var tick = svg('text', { 'class': 'st-tick', x: p[0].toFixed(1), y: (p[1] + 5).toFixed(1) });
+        tick.textContent = String(v);
+        return tick;
+    });
+    var arrows = ['down', 'up', 'ping'].map(function(name) {
+        return svg('g', { 'class': 'st-arrow st-arrow-' + name, transform: 'translate(' + (CX - 40) + ' ' + (CY + 92) + ')' }, paths(name));
+    });
+    var root = svg('svg', { 'class': 'st-gauge', viewBox: '0 0 400 330', 'aria-hidden': 'true', focusable: 'false' },
+        [svg('defs', {}, [gradient('jun-st-down', 'st-stop-down-a', 'st-stop-down-b'),
+            gradient('jun-st-up', 'st-stop-up-a', 'st-stop-up-b')]), svg('path', { 'class': 'st-arc st-track', d: arc }), fill]
+            .concat(ticks, [needle, value, unit], arrows));
+
+    return {
+        node: root,
+        // state: { mode: idle | rest | sweep | value, dir: down | up | ping | '', mbps, text, unit }
+        set: function(state) {
+            var f = state.mode === 'value' ? fraction(state.mbps) : 0;
+            ['down', 'up', 'ping'].forEach(function(dir) { root.classList.toggle('is-' + dir, state.dir === dir); });
+            root.classList.toggle('is-live', state.mode !== 'idle');
+            root.classList.toggle('is-value', state.mode === 'value');
+            root.classList.toggle('is-sweep', state.mode === 'sweep');
+            needle.style.transform = 'rotate(' + (ARC_START + ARC_SWEEP * f - NEEDLE_UP).toFixed(1) + 'deg)';
+            fill.style.strokeDasharray = (100 * f).toFixed(2) + ' 100';
+            value.textContent = state.text || '';
+            unit.textContent = state.unit || '';
+        }
+    };
+}
+
+function infoRow(name, label, lines) {
+    return E('div', { 'class': 'st-info-row' }, [icon(name), E('div', {}, [E('span', { 'class': 'st-label' }, label)].concat(lines))]);
+}
+
 return view.extend({
     load: function() { return getStatus(); },
     render: function(data) {
         var root = E('div', { 'class': 'jun-speedtest-page' });
         var pill = E('span', { 'class': 'st-pill' });
-        var values = {};
-        var tiles = E('div', { 'class': 'st-tiles' }, [
-            ['down', _('Download'), 'Mbps'], ['up', _('Upload'), 'Mbps'],
-            ['latency', _('Latency'), 'ms'], ['jitter', _('Jitter'), 'ms']
-        ].map(function(tile) {
-            values[tile[0]] = E('span', { 'class': 'st-value' }, '–');
-            return E('div', { 'class': 'st-tile' }, [E('span', { 'class': 'st-label' }, tile[1]),
-                E('div', {}, [values[tile[0]], E('span', { 'class': 'st-unit' }, tile[2])])]);
+        var gauge = buildGauge();
+        var stats = {};
+        var jitter = E('span', { 'class': 'st-jitter' }, '–');
+        var statsRow = E('div', { 'class': 'st-stats' }, [
+            ['latency', _('Ping'), 'ms', 'ping'], ['down', _('Download'), 'Mbps', 'down'], ['up', _('Upload'), 'Mbps', 'up']
+        ].map(function(item) {
+            var value = E('span', { 'class': 'st-value' }, '–');
+            var tile = E('div', { 'class': 'st-stat' }, [
+                E('span', { 'class': 'st-label' }, [icon(item[3]), item[1]]), value, E('span', { 'class': 'st-unit' }, item[2])
+            ].concat(item[0] === 'latency' ? [E('span', { 'class': 'st-sub' }, [_('Jitter') + ' ', jitter, ' ms'])] : []));
+            stats[item[0]] = { tile: tile, value: value };
+            return tile;
         }));
-        var details = E('p', { 'class': 'st-help' });
-        var cellLine = E('p', { 'class': 'st-cell' });
         var message = E('p', { 'class': 'st-message', role: 'status', 'aria-live': 'polite' });
-        var start = E('button', { type: 'button', 'class': 'st-button st-primary cbi-button-action' }, _('Start test'));
+        var start = E('button', { type: 'button', 'class': 'st-go st-primary cbi-button-action', 'aria-label': _('Start test') }, _('GO'));
+        var again = E('span', { 'class': 'st-go-caption' });
         var clear = E('button', { type: 'button', 'class': 'st-button st-danger cbi-button-remove' }, _('Clear history'));
+        var serverText = E('span', { 'class': 'st-mono st-server' });
+        var networkText = E('span', { 'class': 'st-mono st-network' });
+        var signalText = E('span', { 'class': 'st-mono st-subline' });
+        var details = E('p', { 'class': 'st-help st-when' });
         var towers = E('div', { 'class': 'st-rows' });
         var history = E('div', { 'class': 'st-rows' });
+        var stage = E('section', { 'class': 'st-card st-stage' }, [
+            statsRow,
+            E('div', { 'class': 'st-gauge-wrap' }, [gauge.node, E('div', { 'class': 'st-center' }, [start, again])]),
+            message,
+            E('div', { 'class': 'st-info' }, [
+                infoRow('server', _('Server'), [serverText]),
+                infoRow('network', _('Network'), [networkText, signalText])
+            ]),
+            details,
+            E('p', { 'class': 'st-note' }, _('Each test transfers up to about 260 MB of mobile data, less on slower connections. Traffic from other devices during the test lowers the result.'))
+        ]);
         var current = data;
         var busy = false;
+        var launching = false;
         var wasRunning = !!data.running;
         var baseline = lastTime(data.results);
 
@@ -137,9 +246,40 @@ return view.extend({
             container.replaceChildren();
             (rows.length ? rows : [E('p', { 'class': 'st-empty' }, empty)]).forEach(function(row) { container.appendChild(row); });
         }
+        // Draws the gauge, the three figures and the connection rows from the last status.
+        function paint() {
+            var status = current;
+            var latest = status.results[status.results.length - 1];
+            var active = launching || !!status.running;
+            var phase = status.running ? status.phase : '';
+            var measuring = phase === 'download' || phase === 'upload';
+            var dir = phase === 'upload' ? 'up' : 'down';
+            stage.classList.toggle('is-running', active);
+            Object.keys(stats).forEach(function(key) {
+                stats[key].tile.classList.toggle('is-active', active && PHASE_METRIC[phase] === key);
+                stats[key].value.textContent = active ? '…' : latest ? num(latest[key], 1) : '–';
+            });
+            jitter.textContent = active ? '…' : latest ? num(latest.jitter, 1) : '–';
+            if (!active)
+                gauge.set({ mode: 'idle' });
+            else if (measuring && typeof status.live_mbps === 'number' && isFinite(status.live_mbps) && status.live_mbps >= 0)
+                gauge.set({ mode: 'value', dir: dir, mbps: status.live_mbps, text: num(status.live_mbps, 1), unit: 'Mbps' });
+            else if (measuring)
+                gauge.set({ mode: 'sweep', dir: dir, text: '…', unit: 'Mbps' });
+            else if (phase === 'saving')
+                gauge.set({ mode: 'rest', dir: '', text: '…', unit: '' });
+            else
+                gauge.set({ mode: 'rest', dir: 'ping', text: '…', unit: 'ms' });
+            again.textContent = status.results.length ? _('Test again') : '';
+            serverText.textContent = latest ? [latest.server ? _('Cloudflare %s').format(latest.server) : _('Cloudflare'),
+                latest.ipver ? 'IPv' + latest.ipver : null].filter(Boolean).join(' · ') : _('Nearest Cloudflare server');
+            networkText.textContent = latest ? [latest.operator, latest.mode || cellName(latest)].filter(Boolean).join(' · ') : '–';
+            signalText.textContent = latest ? signal(latest.rsrp, latest.sinr) : '';
+            details.textContent = latest ? [_('Last test %s').format(when(latest.time)),
+                _('%s MB used').format(num(latest.data_mb, 1))].join(' · ') : _('No tests yet.');
+        }
         function update(status) {
             var results = status.results;
-            var latest = results[results.length - 1];
             var groups = groupCells(results);
             if (status.running)
                 showMessage(_('%s %s s elapsed.').format(phases[status.phase] || phases.starting, Math.max(0, status.now - status.started)));
@@ -154,13 +294,7 @@ return view.extend({
             setButtons();
             pill.className = 'st-pill' + (status.running ? ' is-running' : status.error ? ' is-error' : '');
             pill.textContent = status.running ? _('Testing') : status.error ? _('Last test failed') : _('Ready');
-            Object.keys(values).forEach(function(key) { values[key].textContent = latest ? num(latest[key], 1) : '–'; });
-            details.textContent = latest ? [_('Last test %s').format(when(latest.time)),
-                latest.server ? _('Cloudflare %s').format(latest.server) : null,
-                latest.ipver ? 'IPv' + latest.ipver : null,
-                _('%s MB used').format(num(latest.data_mb, 1))].filter(Boolean).join(' · ') : _('No tests yet.');
-            cellLine.textContent = latest ? [latest.mode || cellName(latest), latest.operator,
-                signal(latest.rsrp, latest.sinr)].filter(Boolean).join(' · ') : '';
+            paint();
             fill(towers, groups.map(function(group, index) {
                 return resultRow(group.name, [group.latest.operator,
                     group.latest.earfcn != null ? 'EARFCN ' + group.latest.earfcn : null,
@@ -173,13 +307,17 @@ return view.extend({
         }
         function action(args, pending) {
             busy = true;
+            launching = args[0] === 'start';
             setButtons();
+            paint();
             showMessage(pending);
             return command(args).then(getStatus).then(update).catch(function(error) {
                 return getStatus().then(update, function() {}).then(function() { showMessage(error.message, true); });
             }).finally(function() {
                 busy = false;
+                launching = false;
                 setButtons();
+                paint();
             });
         }
 
@@ -209,11 +347,7 @@ return view.extend({
             E('div', {}, [E('h1', {}, _('Speed Test')),
                 E('p', { 'class': 'st-help' }, _('Measures the router’s own cellular connection and records the serving cell, so you can compare towers and bands.'))]),
             pill]));
-        root.appendChild(E('section', { 'class': 'st-card' }, [
-            E('div', { 'class': 'st-card-heading' }, [E('h2', {}, _('Latest result')), start]),
-            tiles, details, cellLine, message,
-            E('p', { 'class': 'st-note' }, _('Each test transfers up to about 260 MB of mobile data, less on slower connections. Traffic from other devices during the test lowers the result.'))
-        ]));
+        root.appendChild(stage);
         root.appendChild(E('section', { 'class': 'st-card' }, [
             E('div', { 'class': 'st-card-heading' }, E('h2', {}, _('Tower Analyzer'))),
             E('p', { 'class': 'st-help' }, _('Results grouped by serving cell, fastest first. To compare towers, lock a cell or band, run a test on each and repeat at a similar time of day.')),

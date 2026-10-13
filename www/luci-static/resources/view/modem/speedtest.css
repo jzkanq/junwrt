@@ -4,19 +4,57 @@
 #maincontent .jun-speedtest-page .st-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 #maincontent .jun-speedtest-page .st-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin: 18px 0; box-shadow: 0 1px 3px rgba(15,23,42,.04), 0 4px 12px rgba(15,23,42,.03); }
 #maincontent .jun-speedtest-page .st-card-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-bottom: 16px; }
-#maincontent .jun-speedtest-page .st-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-#maincontent .jun-speedtest-page .st-tile { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 16px; }
 #maincontent .jun-speedtest-page .st-label { display: block; font-size: 11px !important; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #94a3b8; }
-#maincontent .jun-speedtest-page .st-value { font: 600 28px/1.2 ui-monospace, Consolas, monospace; color: #1e293b; }
-#maincontent .jun-speedtest-page .st-unit { margin-left: 6px; font-size: 13px !important; color: #64748b; }
 #maincontent .jun-speedtest-page .st-mono { display: block; font: 600 13px/1.5 ui-monospace, Consolas, monospace; color: #1e293b; overflow-wrap: anywhere; }
 #maincontent .jun-speedtest-page .st-subline { font-weight: 500; color: #64748b; }
 #maincontent .jun-speedtest-page .st-help, #maincontent .jun-speedtest-page .st-empty, #maincontent .jun-speedtest-page .st-note { color: #64748b; font-size: 13px !important; line-height: 1.6; margin: 6px 0; }
-#maincontent .jun-speedtest-page .st-cell { font: 600 13px/1.5 ui-monospace, Consolas, monospace; color: #1e293b; margin: 4px 0 0; overflow-wrap: anywhere; }
 #maincontent .jun-speedtest-page .st-note { border-top: 1px solid #e2e8f0; padding-top: 12px; margin-top: 16px; }
-#maincontent .jun-speedtest-page .st-message { font-size: 13px !important; margin: 12px 0 0; }
+#maincontent .jun-speedtest-page .st-when { margin-top: 12px; }
+#maincontent .jun-speedtest-page .st-icon { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Ookla-style stage: ping / download / upload, gauge, connection rows */
+#maincontent .jun-speedtest-page .st-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+#maincontent .jun-speedtest-page .st-stat { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 12px; text-align: center; }
+#maincontent .jun-speedtest-page .st-stat .st-label { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px 6px; }
+#maincontent .jun-speedtest-page .st-stat.is-active { border-color: #0284c7; box-shadow: inset 0 0 0 1px #0284c7; }
+#maincontent .jun-speedtest-page .st-stat.is-active .st-label { color: #0284c7; }
+#maincontent .jun-speedtest-page .st-value { display: block; margin-top: 6px; font: 600 30px/1.25 ui-monospace, Consolas, monospace; color: #1e293b; }
+#maincontent .jun-speedtest-page .st-unit { display: block; font-size: 12px !important; color: #64748b; }
+#maincontent .jun-speedtest-page .st-sub { display: block; margin-top: 6px; font-size: 12px !important; color: #64748b; }
+#maincontent .jun-speedtest-page .st-jitter { font: 600 12px/1.5 ui-monospace, Consolas, monospace; color: #1e293b; }
+#maincontent .jun-speedtest-page .st-gauge-wrap { position: relative; max-width: 420px; margin: 24px auto 0; }
+#maincontent .jun-speedtest-page .st-gauge { display: block; width: 100%; height: auto; overflow: visible; }
+#maincontent .jun-speedtest-page .st-arc { fill: none; stroke-width: 16; stroke-linecap: round; }
+#maincontent .jun-speedtest-page .st-track { stroke: #e2e8f0; }
+#maincontent .jun-speedtest-page .st-fill { stroke: url(#jun-st-down) #14b8a6; opacity: 0; transition: stroke-dasharray 1.5s cubic-bezier(.22, .61, .36, 1), opacity .2s; }
+#maincontent .jun-speedtest-page .st-gauge.is-up .st-fill { stroke: url(#jun-st-up) #8b5cf6; }
+#maincontent .jun-speedtest-page .st-gauge.is-value .st-fill, #maincontent .jun-speedtest-page .st-gauge.is-sweep .st-fill { opacity: 1; }
+#maincontent .jun-speedtest-page .st-stop-down-a { stop-color: #14b8a6; }
+#maincontent .jun-speedtest-page .st-stop-down-b { stop-color: #22c55e; }
+#maincontent .jun-speedtest-page .st-stop-up-a { stop-color: #a78bfa; }
+#maincontent .jun-speedtest-page .st-stop-up-b { stop-color: #7c3aed; }
+#maincontent .jun-speedtest-page .st-tick { font: 600 15px ui-monospace, Consolas, monospace; fill: #94a3b8; text-anchor: middle; }
+#maincontent .jun-speedtest-page .st-needle { transform-origin: 200px 190px; opacity: 0; transition: transform 1.5s cubic-bezier(.22, .61, .36, 1), opacity .2s; }
+#maincontent .jun-speedtest-page .st-gauge.is-live .st-needle { opacity: 1; }
+#maincontent .jun-speedtest-page .st-needle-body, #maincontent .jun-speedtest-page .st-hub { fill: #0f172a; }
+@keyframes st-sweep { from { transform: rotate(-135deg); } to { transform: rotate(15deg); } }
+@keyframes st-sweep-fill { from { stroke-dasharray: 0 100; } to { stroke-dasharray: 55.6 100; } }
+#maincontent .jun-speedtest-page .st-gauge.is-sweep .st-needle { animation: st-sweep 1.8s ease-in-out infinite alternate; }
+#maincontent .jun-speedtest-page .st-gauge.is-sweep .st-fill { animation: st-sweep-fill 1.8s ease-in-out infinite alternate; }
+#maincontent .jun-speedtest-page .st-readout { font: 600 44px ui-monospace, Consolas, monospace; fill: #1e293b; text-anchor: middle; }
+#maincontent .jun-speedtest-page .st-readout-unit { font: 600 15px ui-monospace, Consolas, monospace; fill: #64748b; text-anchor: start; }
+#maincontent .jun-speedtest-page .st-arrow { display: none; fill: none; stroke: #64748b; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#maincontent .jun-speedtest-page .st-gauge.is-down .st-arrow-down, #maincontent .jun-speedtest-page .st-gauge.is-up .st-arrow-up, #maincontent .jun-speedtest-page .st-gauge.is-ping .st-arrow-ping { display: inline; }
+#maincontent .jun-speedtest-page .st-center { position: absolute; left: 50%; top: 57.6%; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 8px; }
+#maincontent .jun-speedtest-page .st-stage.is-running .st-center { display: none; }
+#maincontent .jun-speedtest-page .st-go { box-sizing: border-box; width: 120px; height: 120px; min-width: 96px; min-height: 96px; border-radius: 50% !important; padding: 0 !important; font-size: 28px !important; font-weight: 600 !important; letter-spacing: .06em; line-height: 1; cursor: pointer; box-shadow: 0 6px 16px rgba(2,132,199,.3); }
+#maincontent .jun-speedtest-page .st-go-caption { font-size: 12px !important; font-weight: 600; color: #64748b; }
+#maincontent .jun-speedtest-page .st-info { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; margin-top: 20px; padding-top: 16px; border-top: 1px solid #e2e8f0; }
+#maincontent .jun-speedtest-page .st-info-row { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+#maincontent .jun-speedtest-page .st-info-row .st-icon { width: 22px; height: 22px; margin-top: 2px; color: #64748b; }
+#maincontent .jun-speedtest-page .st-message { font-size: 13px !important; text-align: center; margin: 12px 0 0; }
 #maincontent .jun-speedtest-page .st-message:empty { display: none; }
-#maincontent .jun-speedtest-page .st-message.is-error { border-left: 3px solid #f59e0b; padding: 12px; background: #f8fafc; color: #92400e; }
+#maincontent .jun-speedtest-page .st-message.is-error { border-left: 3px solid #f59e0b; padding: 12px; background: #f8fafc; color: #92400e; text-align: left; }
 #maincontent .jun-speedtest-page .st-pill { display: inline-flex; align-items: center; border: 1px solid #e2e8f0; border-radius: 20px; padding: 4px 12px; font-size: 12px !important; font-weight: 600; color: #94a3b8; background: #f8fafc; white-space: nowrap; }
 #maincontent .jun-speedtest-page .st-pill.is-running { color: #10b981; border-color: #a7f3d0; background: #e8f9f0; }
 #maincontent .jun-speedtest-page .st-pill.is-error { color: #b45309; border-color: #f59e0b; background: #f8fafc; }
@@ -35,17 +73,28 @@
 #maincontent .jun-speedtest-page .st-danger { background: #ef4444 !important; color: #ffffff !important; border: 1px solid #ef4444 !important; }
 #maincontent .jun-speedtest-page .st-danger:hover { background: #dc2626 !important; }
 #maincontent .jun-speedtest-page .st-button:focus-visible { outline: 2px solid #0284c7; outline-offset: 2px; }
+#maincontent .jun-speedtest-page .st-go:focus-visible { outline: 3px solid #0284c7 !important; outline-offset: 4px !important; }
 #maincontent .jun-speedtest-page button:disabled { opacity: .6; cursor: not-allowed; }
 #maincontent .jun-speedtest-page .st-details { font-size: 13px !important; margin: 16px 0; }
 #maincontent .jun-speedtest-page .st-details summary { cursor: pointer; color: #64748b; padding: 10px 0; }
 html[data-theme=dark] #maincontent .jun-speedtest-page { color: #e8eaed; color-scheme: dark; }
 html[data-theme=dark] #maincontent .jun-speedtest-page h1, html[data-theme=dark] #maincontent .jun-speedtest-page h2, html[data-theme=dark] #maincontent .jun-speedtest-page .st-row-title strong { color: #e8eaed; }
 html[data-theme=dark] #maincontent .jun-speedtest-page .st-card { background: #292a2d; border-color: #3f4044; box-shadow: none; }
-html[data-theme=dark] #maincontent .jun-speedtest-page .st-tile { background: #35363a; border-color: #3f4044; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-stat { background: #35363a; border-color: #3f4044; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-stat.is-active { border-color: #38bdf8; box-shadow: inset 0 0 0 1px #38bdf8; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-stat.is-active .st-label { color: #7dd3fc; }
 html[data-theme=dark] #maincontent .jun-speedtest-page .st-label { color: #9aa0a6; }
-html[data-theme=dark] #maincontent .jun-speedtest-page .st-value, html[data-theme=dark] #maincontent .jun-speedtest-page .st-mono, html[data-theme=dark] #maincontent .jun-speedtest-page .st-cell { color: #e8eaed; }
-html[data-theme=dark] #maincontent .jun-speedtest-page .st-unit, html[data-theme=dark] #maincontent .jun-speedtest-page .st-subline, html[data-theme=dark] #maincontent .jun-speedtest-page .st-help, html[data-theme=dark] #maincontent .jun-speedtest-page .st-empty, html[data-theme=dark] #maincontent .jun-speedtest-page .st-note, html[data-theme=dark] #maincontent .jun-speedtest-page .st-details summary { color: #c4c7cc; }
-html[data-theme=dark] #maincontent .jun-speedtest-page .st-row, html[data-theme=dark] #maincontent .jun-speedtest-page .st-note { border-color: #3f4044; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-value, html[data-theme=dark] #maincontent .jun-speedtest-page .st-jitter, html[data-theme=dark] #maincontent .jun-speedtest-page .st-mono { color: #e8eaed; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-unit, html[data-theme=dark] #maincontent .jun-speedtest-page .st-sub, html[data-theme=dark] #maincontent .jun-speedtest-page .st-subline, html[data-theme=dark] #maincontent .jun-speedtest-page .st-help, html[data-theme=dark] #maincontent .jun-speedtest-page .st-empty, html[data-theme=dark] #maincontent .jun-speedtest-page .st-note, html[data-theme=dark] #maincontent .jun-speedtest-page .st-details summary, html[data-theme=dark] #maincontent .jun-speedtest-page .st-go-caption { color: #c4c7cc; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-row, html[data-theme=dark] #maincontent .jun-speedtest-page .st-note, html[data-theme=dark] #maincontent .jun-speedtest-page .st-info { border-color: #3f4044; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-info-row .st-icon { color: #c4c7cc; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-track { stroke: #3f4044; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-tick { fill: #9aa0a6; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-needle-body, html[data-theme=dark] #maincontent .jun-speedtest-page .st-hub, html[data-theme=dark] #maincontent .jun-speedtest-page .st-readout { fill: #e8eaed; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-readout-unit { fill: #c4c7cc; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-arrow { stroke: #c4c7cc; }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-go { box-shadow: 0 6px 16px rgba(0,0,0,.45); }
+html[data-theme=dark] #maincontent .jun-speedtest-page .st-go:focus-visible { outline-color: #7dd3fc !important; }
 html[data-theme=dark] #maincontent .jun-speedtest-page .st-pill { color: #c4c7cc; border-color: #5a5d63; background: #35363a; }
 html[data-theme=dark] #maincontent .jun-speedtest-page .st-pill.is-running { color: #6fd49a; }
 html[data-theme=dark] #maincontent .jun-speedtest-page .st-pill.is-error { color: #fbbf24; }
@@ -54,13 +103,19 @@ html[data-theme=dark] #maincontent .jun-speedtest-page .st-secondary { backgroun
 html[data-theme=dark] #maincontent .jun-speedtest-page .st-secondary:hover { background: #3f4044 !important; }
 html[data-theme=dark] #maincontent .jun-speedtest-page .st-message.is-error { background: #35363a; color: #fbbf24; }
 @media (max-width: 800px) {
-    #maincontent .jun-speedtest-page .st-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     #maincontent .jun-speedtest-page .st-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     #maincontent .jun-speedtest-page .st-row-title { grid-column: 1 / -1; }
 }
 @media (max-width: 520px) {
     #maincontent .jun-speedtest-page .st-card { padding: 18px; }
     #maincontent .jun-speedtest-page .st-header { flex-direction: column; gap: 4px; }
-    #maincontent .jun-speedtest-page .st-value { font-size: 22px; }
+    #maincontent .jun-speedtest-page .st-stats { gap: 8px; }
+    #maincontent .jun-speedtest-page .st-stat { padding: 10px 6px; }
+    #maincontent .jun-speedtest-page .st-value { font-size: 20px; }
+    #maincontent .jun-speedtest-page .st-go { width: 100px; height: 100px; font-size: 24px !important; }
+    #maincontent .jun-speedtest-page .st-info { grid-template-columns: minmax(0, 1fr); }
     #maincontent .jun-speedtest-page .st-card-heading .st-button { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+    #maincontent .jun-speedtest-page .st-needle, #maincontent .jun-speedtest-page .st-fill { animation: none !important; transition: none !important; }
 }

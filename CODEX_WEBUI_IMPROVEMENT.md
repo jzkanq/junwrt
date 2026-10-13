@@ -1,6 +1,6 @@
 # JunWRT WebUI & Universal Dark Mode Architecture: Codex Handover & Improvement Guide
 
-Speed Test (2026-10-13): Modem → Speed Test runs a router-side cellular test through `/usr/bin/junwrt-speedtest` and saves each result with the serving cell for the Tower Analyzer. It uses a restricted status/start/clear ACL and the static `speedtest.css`, with white Light Mode and graphite Dark Mode surfaces. AGENTS.md section 13 has the measurement rules, limits and tests; `speedtest_audit.py` checks synchronization in both gates.
+Speed Test (2026-10-13): Modem → Speed Test runs a router-side cellular test through `/usr/bin/junwrt-speedtest` and saves each result with the serving cell for the Tower Analyzer. It uses a restricted status/start/clear ACL and the static `speedtest-v2.css` (a cache-bypass copy of `speedtest.css`), with white Light Mode and graphite Dark Mode surfaces. AGENTS.md section 13 has the measurement rules, limits and tests; `speedtest_audit.py` checks synchronization in both gates.
 
 Parental Control (2026-10-02): the Modem tab now has an opt-in device/profile/schedule page, backed by the validated Lua CLI and a procd firewall service. Keep the policy, ACL, menu, service and generated installer/deployment copies synchronized. White Light Mode surfaces have graphite Dark Mode overrides. See [PARENTAL_CONTROL.md](PARENTAL_CONTROL.md) for DNS limitations and required AW1000 hardware NAT acceptance testing; installer inclusion is verified separately from the existing firmware image.
 

@@ -342,7 +342,8 @@ return view.extend({
             ]);
         });
 
-        root.appendChild(E('link', { rel: 'stylesheet', href: L.resource('view/modem/speedtest.css') }));
+        // A new filename bypasses the old speedtest.css that browsers keep even after a hard reload.
+        root.appendChild(E('link', { rel: 'stylesheet', href: L.resource('view/modem/speedtest-v2.css') }));
         root.appendChild(E('header', { 'class': 'st-header' }, [
             E('div', {}, [E('h1', {}, _('Speed Test')),
                 E('p', { 'class': 'st-help' }, _('Measures the router’s own cellular connection and records the serving cell, so you can compare towers and bands.'))]),

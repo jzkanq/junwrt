@@ -52,7 +52,7 @@ mkdir -p /var/run/tailscale
 TMP_TAR="/tmp/junwrt_webui_lic.tar.gz"
 
 if ! base64 -d > "$TMP_TAR" << 'EOF_PAYLOAD'
-H4sIAP+ozWoC/+y97XrbOJIoPH/bV4G4k6HUkWh925HbnU0cZ9pzEsfHds/HcXv9UCJlsS2RGpKy
+H4sIAJWvzWoC/+y97XrbOJIoPH/bV4G4k6HUkWh925HbnU0cZ9pzEsfHds/HcXv9UCJlsS2RGpKy
 40m8z9zD/npvYG9h/++lzJW89QGQ4JcsOenec56Vu2OTIFAAClWFqkIBuL293ZrMh249jKzIHW4F
 TujPg6ETbt24zu3W1Led6dbMChwvsiaXQ9+LAn9i/hL+boWfBvz0Oh36Cz+Zv+3udqf9u2an2+ps
 bzc6mN5qNnrN34nG736Dnzl0PICm/O5/5o8xDx0RRoE7jIzdDSNw/jZ3A0fg4Ovvo1B/m/mTif4+
@@ -12027,7 +12027,9 @@ if [ "$FW_MODIFIED" = "1" ]; then
     /etc/init.d/firewall reload 2>/dev/null || true
 fi
 
-/etc/init.d/network reload 2>/dev/null || true
+# The reload restarts the Wi-Fi daemon (wapp), which keeps its parent's terminal as its output and
+# would print debug lines into this SSH session until it ends, so run the reload detached from it.
+/etc/init.d/network reload </dev/null >/dev/null 2>&1 || true
 /etc/init.d/tailscale enable 2>/dev/null || true
 /etc/init.d/tailscale restart 2>/dev/null || true
 

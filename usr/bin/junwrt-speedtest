@@ -231,7 +231,20 @@ run_test() {
 	result="$(measure up "$blocks")" || { abort "The upload test failed."; return 1; }
 	set -- $result
 	UP="$1"
-	DATA_MB="$(awk -v d="$DOWN_TOTAL" -v u="$2" 'BEGIN { printf "%.1f", (d + u + 1000000) / 1000000 }')"
+	UP_TOTAL="$2"
+	# The 1 MB probe under-estimates fast uplinks, so a pass under 5 s is repeated once,
+	# sized from its own rate; both passes together stay within UP_MAX_BLOCKS per stream.
+	blocks="$(awk -v mbps="$UP" -v bytes="$UP_TOTAL" -v used="$blocks" -v max="$UP_MAX_BLOCKS" 'BEGIN {
+		want = int(mbps * 1000000 / 8 * 2 / 100000)
+		if (want > max - used) want = max - used
+		if (mbps > 0 && bytes * 8 / (mbps * 1000000) < 5 && want > used) print want
+	}')"
+	if [ -n "$blocks" ] && result="$(measure up "$blocks")"; then
+		set -- $result
+		UP="$1"
+		UP_TOTAL=$((UP_TOTAL + $2))
+	fi
+	DATA_MB="$(awk -v d="$DOWN_TOTAL" -v u="$UP_TOTAL" 'BEGIN { printf "%.1f", (d + u + 1000000) / 1000000 }')"
 	case "$ip" in
 		*:*) IPVER=6 ;;
 		'') IPVER="" ;;

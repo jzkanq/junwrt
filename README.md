@@ -64,6 +64,13 @@ JunWRT comes with built-in commercial machine-tied licensing:
   - Tests the router's own cellular link against the nearest Cloudflare server (download, upload, latency, jitter), so Wi-Fi does not affect the result.
   - Saves each result with the serving cell (band, PCI, EARFCN, RSRP/SINR) and ranks cells by average speed; the router keeps the last 50 results.
   - Runs only when started. Each test uses up to about 260 MB of mobile data. SSH: `junwrt-speedtest run`, `junwrt-speedtest towers`.
+* **🧰 Opt-in Modem pages (Connection Guard, Data Usage, Notifications, Security, Support)**:
+  - **Connection Guard**: when the cellular link stays down it re-dials the interface, then restarts the modem radio and, only if you enable it, reboots. Off by default, with a cooldown and a daily limit.
+  - **Data Usage**: counts cellular bytes per day and warns before your monthly limit.
+  - **Notifications**: Telegram, ntfy or webhook alerts for connection loss, cell changes, data limit, Guard actions, slow speed tests and received SMS.
+  - **Security**: flags the factory password, SSH open to the internet side, UPnP and open Wi-Fi, with two safe one-click fixes.
+  - **Support**: shows the installed build, checks the installed files against the installer's manifest and creates a redacted diagnostics bundle.
+  - Settings are kept across re-installs; nothing here changes your Wi-Fi names or passwords.
 * **🎨 Light / Dark Modern Hardware Appliance UI**:
   - Crisp white Light Mode and neutral graphite-gray Dark Mode across all modem sub-pages (Cell Scan, SIM, Band Lock, IMEI, APN, TTL, AT Debug, SMS).
   - High-contrast solid buttons and status badges.

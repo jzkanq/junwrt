@@ -1,0 +1,32 @@
+{
+  "luci-app-junwrt-security": {
+    "description": "Check who can reach the router and apply the safe fixes",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-security status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-security fix dropbear-lan": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-security fix upnp-off": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

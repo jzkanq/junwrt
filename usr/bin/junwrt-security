@@ -1,0 +1,173 @@
+#!/bin/sh
+# JunWRT security check: reports the settings that decide who can reach the router and applies the few
+# fixes that are safe to apply without a password or other input from the user.
+
+ROOT="${JUNWRT_SECURITY_ROOT:-}" # test hook: prefix for the paths below
+SHADOW="$ROOT/etc/shadow"
+L1PROFILE="$ROOT/etc/wireless/l1profile.dat"
+# Hash of the root password that ships in the firmware image; it never changes between routers.
+FACTORY_HASH='$1$30eWyKAT$PS10ALMUM8qPpmg4M648r.'
+
+die() {
+	printf '{"error":"%s"}\n' "$1"
+	exit 1
+}
+
+clean() {
+	printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-"${2:-160}"
+}
+
+CHECKS=""
+WORST=ok
+
+# add_check ID LEVEL TITLE DETAIL FIX
+add_check() {
+	CHECKS="${CHECKS}${CHECKS:+,}{\"id\":\"$1\",\"level\":\"$2\",\"title\":\"$(clean "$3" 80)\",\"detail\":\"$(clean "$4" 220)\",\"fix\":\"$5\"}"
+	case "$2" in
+		bad) WORST=bad ;;
+		warn) [ "$WORST" = bad ] || WORST=warn ;;
+	esac
+}
+
+check_password() {
+	local hash
+	hash="$(sed -n 's/^root:\([^:]*\):.*/\1/p' "$SHADOW" 2>/dev/null | head -n 1)"
+	case "$hash" in
+		'')
+			add_check password bad "No router password" "Anyone on your network or Wi-Fi can sign in as administrator. Set a password in System › Administration." "" ;;
+		'!'|'*'|'!!')
+			add_check password ok "Password sign-in is disabled" "The administrator account accepts SSH keys only." "" ;;
+		"$FACTORY_HASH")
+			add_check password bad "Factory router password" "The administrator password is still the one that ships with the firmware. Change it in System › Administration." "" ;;
+		*)
+			add_check password ok "Router password changed" "The administrator password is not the factory one." "" ;;
+	esac
+}
+
+# Reads the firewall once: sets FW_SSH when a WAN rule accepts port 22 and FW_WAN_INPUT when the WAN zone accepts input.
+scan_firewall() {
+	local line section key value type="" name="" input="" src="" port="" target="" enabled="" previous=""
+	FW_SSH=0
+	FW_WAN_INPUT=0
+	finish_section() {
+		case "$type" in
+			rule)
+				if [ "$src" = wan ] && [ "$target" = ACCEPT ] && [ "$enabled" != 0 ]; then
+					case " $(printf '%s' "$port" | tr ',' ' ') " in *" 22 "*) FW_SSH=1 ;; esac
+				fi ;;
+			zone)
+				[ "$name" = wan ] && [ "$input" = ACCEPT ] && FW_WAN_INPUT=1 ;;
+		esac
+	}
+	while IFS= read -r line; do
+		case "$line" in
+			firewall.*) ;;
+			*) continue ;;
+		esac
+		section="${line#firewall.}"
+		section="${section%%[.=]*}"
+		if [ "$section" != "$previous" ]; then
+			finish_section
+			type=""; name=""; input=""; src=""; port=""; target=""; enabled=""
+			previous="$section"
+		fi
+		key="${line#"firewall.$section"}"
+		case "$key" in
+			=*) type="${key#=}" ;;
+			.*)
+				value="${key#*=}"
+				value="${value#\'}"
+				value="${value%\'}"
+				case "${key%%=*}" in
+					.name) name="$value" ;;
+					.input) input="$value" ;;
+					.src) src="$value" ;;
+					.dest_port) port="$value" ;;
+					.target) target="$value" ;;
+					.enabled) enabled="$value" ;;
+				esac ;;
+		esac
+	done <<EOF
+$(uci -q show firewall 2>/dev/null)
+EOF
+	finish_section
+}
+
+check_exposure() {
+	scan_firewall
+	if [ "$FW_WAN_INPUT" = 1 ]; then
+		add_check exposure bad "The internet side accepts connections" "The WAN firewall zone is set to accept incoming traffic, so the router's services are reachable from outside." ""
+	elif [ "$FW_SSH" = 1 ]; then
+		add_check exposure bad "SSH is open to the internet side" "A firewall rule accepts SSH (port 22) from the WAN zone. Remove the rule, or restrict SSH to the LAN if you do not need remote access." dropbear-lan
+	else
+		add_check exposure ok "Incoming connections are blocked" "The WAN firewall zone rejects incoming traffic and no rule opens SSH." ""
+	fi
+}
+
+check_upnp() {
+	if [ "$(uci -q get upnpd.config.enabled 2>/dev/null)" = 1 ]; then
+		add_check upnp warn "UPnP is on" "Devices on your network can open ports to the internet side by themselves. Turn it off unless an application needs it." upnp-off
+	else
+		add_check upnp ok "UPnP is off" "Devices cannot open ports on their own." ""
+	fi
+}
+
+check_wifi() {
+	local profile auth bss ssid index open="" listed=""
+	[ -f "$L1PROFILE" ] || { add_check wifi ok "Wi-Fi profile not found" "No wireless profile to inspect on this router." ""; return 0; }
+	for profile in $(sed -n 's/^INDEX[0-9]*_profile_path=//p' "$L1PROFILE" | tr ';' ' '); do
+		[ -f "$ROOT$profile" ] || continue
+		case " $listed " in *" $profile "*) continue ;; esac
+		listed="$listed $profile"
+		auth="$(sed -n 's/^AuthMode=//p' "$ROOT$profile" | head -n 1 | tr -d '\r')"
+		bss="$(sed -n 's/^BssidNum=//p' "$ROOT$profile" | head -n 1 | tr -d '\r')"
+		case "$bss" in ''|*[!0-9]*) bss=1 ;; esac
+		index=1
+		for mode in $(printf '%s' "$auth" | tr ';' ' '); do
+			[ "$index" -le "$bss" ] || break
+			if [ "$mode" = OPEN ]; then
+				ssid="$(sed -n "s/^SSID$index=//p" "$ROOT$profile" | head -n 1 | tr -d '\r')"
+				open="${open}${open:+, }$(clean "${ssid:-SSID$index}" 32)"
+			fi
+			index=$((index + 1))
+		done
+	done
+	if [ -n "$open" ]; then
+		add_check wifi bad "Wi-Fi without a password" "These networks are open to anyone in range: $open. Set a password in Wireless." ""
+	else
+		add_check wifi ok "Wi-Fi networks are protected" "Every enabled network uses a Wi-Fi password." ""
+	fi
+}
+
+status() {
+	check_password
+	check_exposure
+	check_upnp
+	check_wifi
+	printf '{"worst":"%s","checks":[%s],"now":%s}\n' "$WORST" "$CHECKS" "$(date +%s)"
+}
+
+fix() {
+	case "$1" in
+		dropbear-lan)
+			uci -q set dropbear.@dropbear[0].Interface=lan && uci -q commit dropbear || die "Could not change the SSH settings."
+			[ -x "$ROOT/etc/init.d/dropbear" ] && "$ROOT/etc/init.d/dropbear" restart >/dev/null 2>&1
+			printf '{"success":true}\n' ;;
+		upnp-off)
+			uci -q set upnpd.config.enabled=0 && uci -q commit upnpd || die "Could not change the UPnP settings."
+			for service in miniupnpd mtk_miniupnpd; do
+				if [ -x "$ROOT/etc/init.d/$service" ]; then
+					"$ROOT/etc/init.d/$service" stop >/dev/null 2>&1
+					"$ROOT/etc/init.d/$service" disable >/dev/null 2>&1
+				fi
+			done
+			printf '{"success":true}\n' ;;
+		*) die "Unknown fix." ;;
+	esac
+}
+
+case "${1:-}" in
+	status) status ;;
+	fix) fix "$2" ;;
+	*) echo "Usage: $0 {status|fix dropbear-lan|upnp-off}"; exit 2 ;;
+esac

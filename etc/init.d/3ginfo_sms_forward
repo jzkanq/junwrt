@@ -1,0 +1,82 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+STOP=10
+USE_PROCD=1
+
+LUA="/usr/bin/lua"
+DAEMON="/usr/share/3ginfo-lite/sms-forward.lua"
+
+load_forward_config() {
+	local section="$1"
+
+	[ "$FORWARD_SECTION_FOUND" = "1" ] && return 0
+	config_get_bool FORWARD_ENABLED "$section" sms_forward_enabled 0
+	config_get FORWARD_NUMBER "$section" sms_forward_number ''
+	config_get_bool NOTIFY_ENABLED "$section" sms_notify 0
+	FORWARD_SECTION_FOUND=1
+}
+
+valid_forward_number() {
+	local number="$1"
+	local digits
+	local length
+
+	case "$number" in
+		+*) digits="${number#+}" ;;
+		*) digits="$number" ;;
+	esac
+
+	case "$digits" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+
+	length="${#digits}"
+	[ "$length" -ge 5 ] && [ "$length" -le 15 ]
+}
+
+start_service() {
+	FORWARD_SECTION_FOUND=0
+	FORWARD_ENABLED=0
+	FORWARD_NUMBER=
+	NOTIFY_ENABLED=0
+
+	config_load 3ginfo
+	config_foreach load_forward_config 3ginfo
+
+	# The same inbox scanner also feeds Modem > Notifications (sms_notify), with or without forwarding.
+	if [ "$FORWARD_ENABLED" != "1" ] && [ "$NOTIFY_ENABLED" != "1" ]; then
+		if [ -x "$LUA" ] && [ -r "$DAEMON" ]; then
+			"$LUA" "$DAEMON" --disable >/dev/null 2>&1 ||
+				logger -t 3ginfo_sms_forward "Failed to record the disabled SMS forwarding state"
+		fi
+		return 0
+	fi
+
+	if [ "$FORWARD_ENABLED" = "1" ] && ! valid_forward_number "$FORWARD_NUMBER"; then
+		logger -t 3ginfo_sms_forward "SMS forwarding is enabled but the destination number is invalid"
+		return 1
+	fi
+
+	if [ ! -x "$LUA" ] || [ ! -r "$DAEMON" ]; then
+		logger -t 3ginfo_sms_forward "SMS forwarding daemon is unavailable"
+		return 1
+	fi
+
+	procd_open_instance
+	procd_set_param command "$LUA" "$DAEMON"
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param file /etc/config/3ginfo
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger 3ginfo
+}
+
+reload_service() {
+	stop
+	start
+}

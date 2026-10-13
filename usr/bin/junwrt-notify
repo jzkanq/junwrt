@@ -1,0 +1,399 @@
+#!/bin/sh
+# JunWRT notifications: Telegram, ntfy or a webhook for connection, cell, data-limit, guard and speed events.
+# Opt-in. Secrets live in UCI only and are handed to curl on stdin so they never show in the process list.
+
+ROOT="${JUNWRT_NOTIFY_ROOT:-}" # test hook: prefix for the paths below
+CONFIG=junwrt-notify
+CONF_FILE="$ROOT/etc/config/$CONFIG"
+RUN_DIR="$ROOT/var/run/junwrt-notify"
+LOG="$RUN_DIR/log"
+QUEUE="$RUN_DIR/queue"
+CELL_STATE="$RUN_DIR/cell"
+MODEM_INFO="${JUNWRT_NOTIFY_MODEM_INFO:-$ROOT/usr/share/3ginfo-lite/3ginfo.sh}"
+UPTIME_FILE="$ROOT/proc/uptime"
+SMS_SERVICE="${JUNWRT_NOTIFY_SMS_SERVICE:-/etc/init.d/3ginfo_sms_forward}"
+MIN_GAP=30      # seconds between two messages of the same event
+MAX_QUEUE=10
+MAX_LOG=30
+
+die() {
+	printf '{"error":"%s"}\n' "$1"
+	exit 1
+}
+
+clean() {
+	printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-"${2:-200}"
+}
+
+num() {
+	case "$1" in
+		''|*[!0-9]*) printf '0' ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+now() {
+	date +%s
+}
+
+load_config() {
+	local line key value
+	ENABLED=0; PROVIDER=telegram; TG_TOKEN=; TG_CHAT=; NTFY_SERVER='https://ntfy.sh'; NTFY_TOPIC=; NTFY_TOKEN=; HOOK_URL=
+	EV_WAN=1; EV_GUARD=1; EV_USAGE=1; EV_CELL=0; EV_SPEED=0; EV_SMS=0; SPEED_MIN=0; LABEL=
+	while IFS= read -r line; do
+		case "$line" in
+			"$CONFIG.main."*) ;;
+			*) continue ;;
+		esac
+		key="${line#"$CONFIG.main."}"
+		value="${key#*=}"
+		key="${key%%=*}"
+		value="${value#\'}"
+		value="${value%\'}"
+		case "$key" in
+			enabled) [ "$value" = 1 ] && ENABLED=1 ;;
+			provider) case "$value" in telegram|ntfy|webhook) PROVIDER="$value" ;; esac ;;
+			telegram_token) TG_TOKEN="$value" ;;
+			telegram_chat) TG_CHAT="$value" ;;
+			ntfy_server) [ -n "$value" ] && NTFY_SERVER="$value" ;;
+			ntfy_topic) NTFY_TOPIC="$value" ;;
+			ntfy_token) NTFY_TOKEN="$value" ;;
+			webhook_url) HOOK_URL="$value" ;;
+			ev_wan) [ "$value" = 0 ] && EV_WAN=0 ;;
+			ev_guard) [ "$value" = 0 ] && EV_GUARD=0 ;;
+			ev_usage) [ "$value" = 0 ] && EV_USAGE=0 ;;
+			ev_cell) [ "$value" = 1 ] && EV_CELL=1 ;;
+			ev_speed) [ "$value" = 1 ] && EV_SPEED=1 ;;
+			ev_sms) [ "$value" = 1 ] && EV_SMS=1 ;;
+			speed_min) SPEED_MIN="$(num "$value")" ;;
+			label) LABEL="$value" ;;
+		esac
+	done <<EOF
+$(uci -q show "$CONFIG.main" 2>/dev/null)
+EOF
+	[ -n "$LABEL" ] || LABEL="$(cat "$ROOT/proc/sys/kernel/hostname" 2>/dev/null)"
+	[ -n "$LABEL" ] || LABEL=JunWRT
+	return 0
+}
+
+configured() {
+	case "$PROVIDER" in
+		telegram) [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ] ;;
+		ntfy) [ -n "$NTFY_TOPIC" ] ;;
+		webhook) [ -n "$HOOK_URL" ] ;;
+		*) return 1 ;;
+	esac
+}
+
+log_line() { # ok|fail|queued event message
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	printf '%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$(clean "$3" 140)" >> "$LOG" 2>/dev/null
+	tail -n "$MAX_LOG" "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"
+}
+
+# deliver TITLE MESSAGE: success when the provider accepts the message.
+deliver() {
+	local title message reply code
+	title="$(clean "$1" 80)"
+	message="$(clean "$2" 600)"
+	DELIVER_ERROR=""
+	case "$PROVIDER" in
+		telegram)
+			reply="$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\ndata-urlencode = "chat_id=%s"\ndata-urlencode = "text=[%s] %s: %s"\n' \
+				"$TG_TOKEN" "$TG_CHAT" "$LABEL" "$title" "$message" | curl -sS -m 15 -K - 2>&1)"
+			case "$reply" in
+				*'"ok":true'*) return 0 ;;
+			esac
+			DELIVER_ERROR="Telegram: $(clean "$reply" 120)"
+			;;
+		ntfy)
+			code="$( {
+				printf 'url = "%s/%s"\nwrite-out = "%%{http_code}"\noutput = "/dev/null"\nheader = "Title: [%s] %s"\n' \
+					"${NTFY_SERVER%/}" "$NTFY_TOPIC" "$LABEL" "$title"
+				[ -n "$NTFY_TOKEN" ] && printf 'header = "Authorization: Bearer %s"\n' "$NTFY_TOKEN"
+				printf 'data = "%s"\n' "$message"
+			} | curl -sS -m 15 -K - 2>/dev/null)"
+			case "$code" in 2??) return 0 ;; esac
+			DELIVER_ERROR="ntfy answered HTTP ${code:-none}"
+			;;
+		webhook)
+			code="$(printf 'url = "%s"\nwrite-out = "%%{http_code}"\noutput = "/dev/null"\nheader = "Content-Type: application/json"\ndata = "{\\"device\\":\\"%s\\",\\"title\\":\\"%s\\",\\"message\\":\\"%s\\",\\"time\\":%s}"\n' \
+				"$HOOK_URL" "$LABEL" "$title" "$message" "$(now)" | curl -sS -m 15 -K - 2>/dev/null)"
+			case "$code" in 2??) return 0 ;; esac
+			DELIVER_ERROR="The webhook answered HTTP ${code:-none}"
+			;;
+		*) DELIVER_ERROR="No provider is selected" ;;
+	esac
+	return 1
+}
+
+enqueue() {
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	printf '%s\t%s\t%s\n' "$(now)" "$(clean "$1" 80)" "$(clean "$2" 600)" >> "$QUEUE"
+	tail -n "$MAX_QUEUE" "$QUEUE" > "$QUEUE.tmp" 2>/dev/null && mv -f "$QUEUE.tmp" "$QUEUE"
+}
+
+# flush_queue: deliver messages that could not be sent while the link was down.
+flush_queue() {
+	local at title message failed=0 held="$QUEUE.hold"
+	[ -s "$QUEUE" ] || return 0
+	mv -f "$QUEUE" "$held" 2>/dev/null || return 0
+	while IFS='	' read -r at title message; do
+		[ -n "$title" ] || continue
+		# After the first failure the link is still down: keep the rest queued without more attempts.
+		if [ "$failed" = 0 ] && deliver "$title" "(delayed $((($(now) - $(num "$at")) / 60)) min) $message"; then
+			log_line ok queued "$title"
+		else
+			failed=1
+			printf '%s\t%s\t%s\n' "$at" "$title" "$message" >> "$QUEUE"
+		fi
+	done < "$held"
+	rm -f "$held"
+}
+
+event_enabled() {
+	case "$1" in
+		wan) [ "$EV_WAN" = 1 ] ;;
+		guard) [ "$EV_GUARD" = 1 ] ;;
+		usage) [ "$EV_USAGE" = 1 ] ;;
+		cell) [ "$EV_CELL" = 1 ] ;;
+		speed) [ "$EV_SPEED" = 1 ] ;;
+		sms) [ "$EV_SMS" = 1 ] ;;
+		*) return 1 ;;
+	esac
+}
+
+# event NAME TITLE MESSAGE: called by the other JunWRT modules.
+event() {
+	local name="$1" title="$2" message="$3" last at
+	load_config
+	[ "$ENABLED" = 1 ] && configured && event_enabled "$name" || return 0
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	at="$(now)"
+	last="$(num "$(cat "$RUN_DIR/last.$name" 2>/dev/null)")"
+	if [ $((at - last)) -lt "$MIN_GAP" ]; then
+		log_line skipped "$name" "$message"
+		return 0
+	fi
+	printf '%s\n' "$at" > "$RUN_DIR/last.$name"
+	if deliver "$title" "$message"; then
+		log_line ok "$name" "$message"
+		flush_queue
+	else
+		enqueue "$title" "$message"
+		log_line queued "$name" "$DELIVER_ERROR"
+	fi
+	return 0
+}
+
+# wan-state ifup|ifdown: hotplug entry point with simple debouncing.
+wan_state() {
+	local at down uptime minutes
+	at="$(now)"
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	case "$1" in
+		ifdown)
+			[ -f "$RUN_DIR/wan_down" ] || printf '%s\n' "$at" > "$RUN_DIR/wan_down"
+			;;
+		ifup)
+			down="$(num "$(cat "$RUN_DIR/wan_down" 2>/dev/null)")"
+			rm -f "$RUN_DIR/wan_down"
+			uptime="$(num "$(cut -d. -f1 "$UPTIME_FILE" 2>/dev/null)")"
+			if [ "$down" -gt 0 ] && [ $((at - down)) -ge 20 ]; then
+				minutes=$(((at - down + 30) / 60))
+				event wan "Internet" "Connection restored after about $minutes min offline"
+			elif [ "$down" = 0 ] && [ "$uptime" -lt 300 ]; then
+				event wan "Internet" "The router started and the cellular connection is up"
+			fi
+			;;
+	esac
+}
+
+# speed-result DOWN UP LATENCY: called by the speed test; alerts when the download is under the minimum.
+speed_result() {
+	local down="${1%%.*}" d u l
+	load_config
+	[ "$EV_SPEED" = 1 ] && [ "$SPEED_MIN" -gt 0 ] || return 0
+	[ "$(num "$down")" -lt "$SPEED_MIN" ] || return 0
+	d="$(clean "$1" 12)"
+	u="$(clean "$2" 12)"
+	l="$(clean "$3" 12)"
+	event speed "Slow speed test" "Download $d Mbps is below $SPEED_MIN Mbps, upload $u Mbps, ping $l ms"
+}
+
+# cell_poll: alert when the serving cell changes and stays changed for two polls.
+cell_poll() {
+	local json band pci s1 s1pci sig previous pending
+	[ -x "$MODEM_INFO" ] || return 0
+	json="$("$MODEM_INFO" json 2>/dev/null)"
+	[ -n "$json" ] || return 0
+	band="$(clean "$(jsonfilter -s "$json" -e '@.pband' 2>/dev/null)" 40)"
+	pci="$(clean "$(jsonfilter -s "$json" -e '@.pci' 2>/dev/null)" 12)"
+	s1="$(clean "$(jsonfilter -s "$json" -e '@.s1band' 2>/dev/null)" 40)"
+	s1pci="$(clean "$(jsonfilter -s "$json" -e '@.s1pci' 2>/dev/null)" 12)"
+	[ -n "$band" ] && [ "$band" != "-" ] || return 0
+	[ "$s1" = "-" ] && s1=""
+	sig="${band%% *} PCI ${pci}"
+	[ -n "$s1" ] && sig="$sig + ${s1%% *} PCI ${s1pci}"
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	previous="$(cat "$CELL_STATE" 2>/dev/null)"
+	if [ -z "$previous" ]; then
+		printf '%s\n' "$sig" > "$CELL_STATE"
+	elif [ "$sig" != "$previous" ]; then
+		pending="$(cat "$CELL_STATE.pending" 2>/dev/null)"
+		if [ "$pending" = "$sig" ]; then
+			printf '%s\n' "$sig" > "$CELL_STATE"
+			rm -f "$CELL_STATE.pending"
+			event cell "Serving cell" "Changed from $previous to $sig"
+		else
+			printf '%s\n' "$sig" > "$CELL_STATE.pending"
+		fi
+	else
+		rm -f "$CELL_STATE.pending"
+	fi
+}
+
+run_daemon() {
+	local loops=0
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	while :; do
+		load_config
+		if [ "$ENABLED" = 1 ] && configured; then
+			flush_queue
+			[ "$EV_CELL" = 1 ] && cell_poll
+		fi
+		loops=$((loops + 1))
+		[ -z "$JUNWRT_NOTIFY_LOOPS" ] || [ "$loops" -lt "$JUNWRT_NOTIFY_LOOPS" ] || break
+		sleep 60 &
+		wait $!
+	done
+}
+
+log_json() {
+	local first=1 t level name msg
+	printf '['
+	if [ -f "$LOG" ]; then
+		tail -n 15 "$LOG" | while IFS='	' read -r t level name msg; do
+			[ -n "$name" ] || continue
+			printf '%s{"t":%s,"r":"%s","e":"%s","m":"%s"}' "$([ "$first" = 1 ] || printf ',')" "$(num "$t")" \
+				"$(clean "$level" 12)" "$(clean "$name" 16)" "$(clean "$msg" 140)"
+			first=0
+		done
+	fi
+	printf ']'
+}
+
+host_of() {
+	local rest="${1#*://}"
+	printf '%s' "${rest%%[/?]*}"
+}
+
+status() {
+	local queued=0
+	load_config
+	[ -s "$QUEUE" ] && queued="$(wc -l < "$QUEUE" | tr -d ' ')"
+	printf '{"enabled":%s,"provider":"%s","configured":%s,"label":"%s",' "$ENABLED" "$PROVIDER" "$(configured && echo 1 || echo 0)" "$(clean "$LABEL" 40)"
+	printf '"telegram":{"chat":"%s","token_set":%s},' "$(clean "$TG_CHAT" 40)" "$([ -n "$TG_TOKEN" ] && echo 1 || echo 0)"
+	printf '"ntfy":{"server":"%s","topic":"%s","token_set":%s},' "$(clean "$NTFY_SERVER" 120)" "$(clean "$NTFY_TOPIC" 64)" "$([ -n "$NTFY_TOKEN" ] && echo 1 || echo 0)"
+	printf '"webhook":{"host":"%s","set":%s},' "$(clean "$(host_of "$HOOK_URL")" 80)" "$([ -n "$HOOK_URL" ] && echo 1 || echo 0)"
+	printf '"events":{"wan":%s,"guard":%s,"usage":%s,"cell":%s,"speed":%s,"sms":%s},"speed_min":%s,"queued":%s,"now":%s,"log":%s}\n' \
+		"$EV_WAN" "$EV_GUARD" "$EV_USAGE" "$EV_CELL" "$EV_SPEED" "$EV_SMS" "$SPEED_MIN" "$(num "$queued")" "$(now)" "$(log_json)"
+}
+
+test_send() {
+	load_config
+	configured || die "Choose a provider and fill in its details first."
+	if deliver "Test" "This is a test message from your JunWRT router."; then
+		log_line ok test "Test message delivered"
+		printf '{"ok":true}\n'
+	else
+		log_line fail test "$DELIVER_ERROR"
+		printf '{"ok":false,"error":"%s"}\n' "$(clean "$DELIVER_ERROR" 160)"
+	fi
+}
+
+in_range() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+
+valid_value() { # key value
+	case "$1" in
+		enabled|ev_wan|ev_guard|ev_usage|ev_cell|ev_speed|ev_sms) case "$2" in 0|1) return 0 ;; esac; return 1 ;;
+		provider) case "$2" in telegram|ntfy|webhook) return 0 ;; esac; return 1 ;;
+		speed_min) in_range "$2" 0 10000 ;;
+		label) case "$2" in ''|*[!A-Za-z0-9._\ -]*) return 1 ;; esac; [ "${#2}" -le 40 ] ;;
+		telegram_token) case "$2" in ''|*[!0-9A-Za-z:_-]*) return 1 ;; esac; case "$2" in [0-9]*:*) return 0 ;; esac; return 1 ;;
+		telegram_chat) case "$2" in ''|*[!0-9A-Za-z@_-]*) return 1 ;; esac; [ "${#2}" -le 40 ] ;;
+		ntfy_server|webhook_url)
+			case "$2" in https://*|http://*) ;; *) return 1 ;; esac
+			case "$2" in *[!A-Za-z0-9._~:/?\&=%+#@,-]*) return 1 ;; esac
+			[ "${#2}" -ge 12 ] && [ "${#2}" -le 300 ] ;;
+		ntfy_topic) case "$2" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac; [ "${#2}" -le 64 ] ;;
+		ntfy_token) case "$2" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac; [ "${#2}" -le 100 ] ;;
+		*) return 1 ;;
+	esac
+}
+
+save() {
+	local arg key value
+	[ $# -gt 0 ] || die "Nothing to save."
+	for arg in "$@"; do
+		case "$arg" in
+			*=*) ;;
+			*) die "Use key=value pairs." ;;
+		esac
+		key="${arg%%=*}"
+		value="${arg#*=}"
+		if [ -z "$value" ]; then
+			# An empty secret field means "keep the stored value"; only plain options may be cleared.
+			case "$key" in label|ntfy_topic|telegram_chat) ;; *) die "Empty value for $(clean "$key" 24)." ;; esac
+		else
+			valid_value "$key" "$value" || die "Invalid value for $(clean "$key" 24)."
+		fi
+	done
+	[ -f "$CONF_FILE" ] || touch "$CONF_FILE" 2>/dev/null || die "Could not create the configuration."
+	uci -q get "$CONFIG.main" >/dev/null 2>&1 || uci -q set "$CONFIG.main=notify" || die "Could not create the configuration section."
+	for arg in "$@"; do
+		key="${arg%%=*}"
+		value="${arg#*=}"
+		if [ -z "$value" ]; then
+			uci -q delete "$CONFIG.main.$key" >/dev/null 2>&1
+		else
+			uci -q set "$CONFIG.main.$key=$value" || die "Could not save $(clean "$key" 24)."
+		fi
+	done
+	uci -q commit "$CONFIG" || die "Could not commit the configuration."
+	case " $* " in
+		*" ev_sms="*|*" enabled="*) sync_sms_notify ;;
+	esac
+	printf '{"success":true}\n'
+}
+
+# The SMS inbox scanner of Modem > SMS reports new messages when sms_notify is 1.
+sync_sms_notify() {
+	local want=0
+	load_config
+	[ "$ENABLED" = 1 ] && [ "$EV_SMS" = 1 ] && want=1
+	uci -q get '3ginfo.@3ginfo[0]' >/dev/null 2>&1 || uci -q add 3ginfo 3ginfo >/dev/null 2>&1
+	if [ "$(uci -q get '3ginfo.@3ginfo[0].sms_notify' 2>/dev/null)" != "$want" ]; then
+		uci -q set "3ginfo.@3ginfo[0].sms_notify=$want" && uci -q commit 3ginfo
+		[ -x "$SMS_SERVICE" ] && "$SMS_SERVICE" reload >/dev/null 2>&1 &
+	fi
+	return 0
+}
+
+case "${1:-}" in
+	status) status ;;
+	save) shift; save "$@" ;;
+	test) test_send ;;
+	event) shift; event "$1" "$2" "$3" ;;
+	wan-state) wan_state "$2" ;;
+	speed-result) speed_result "$2" "$3" "$4" ;;
+	clear-log) printf '' > "$LOG" 2>/dev/null; rm -f "$QUEUE"; printf '{"success":true}\n' ;;
+	flush) load_config; flush_queue ;;
+	daemon|run) run_daemon ;;
+	*) echo "Usage: $0 {status|save key=value...|test|event NAME TITLE MESSAGE|wan-state ifup|ifdown|clear-log|daemon}"; exit 2 ;;
+esac

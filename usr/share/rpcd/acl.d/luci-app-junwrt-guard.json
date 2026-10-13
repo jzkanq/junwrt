@@ -1,0 +1,35 @@
+{
+  "luci-app-junwrt-guard": {
+    "description": "Watch the cellular connection and recover it when it stays down",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-guard status": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-guard check": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-guard save *": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-guard clear-log": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

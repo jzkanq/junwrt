@@ -1,0 +1,32 @@
+{
+  "luci-app-junwrt-usage": {
+    "description": "Count cellular data per day and warn before the monthly limit",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-usage status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-usage save *": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-usage reset": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

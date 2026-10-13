@@ -1,0 +1,388 @@
+#!/bin/sh
+# JunWRT data usage accountant: counts the bytes the cellular interface carries, keeps daily totals
+# in /etc/junwrt-usage/daily and compares the billing period with an optional monthly cap.
+
+ROOT="${JUNWRT_USAGE_ROOT:-}" # test hook: prefix for the paths below
+CONFIG=junwrt-usage
+CONF_FILE="$ROOT/etc/config/$CONFIG"
+DATA_DIR="$ROOT/etc/junwrt-usage"
+HISTORY="$DATA_DIR/daily"     # "YYYYMMDD rx tx" per line, bytes
+ALERT="$DATA_DIR/alert"       # "<period start> <level>" of the last cap alert
+RUN_DIR="$ROOT/var/run/junwrt-usage"
+LAST="$RUN_DIR/last"          # "<device> rx tx" of the previous sample
+PENDING="$RUN_DIR/pending"    # "YYYYMMDD rx tx" counted since the last flush
+STAMP="$RUN_DIR/stamp"        # epoch of the last sample; shows that the service runs
+SYS_NET="${JUNWRT_USAGE_SYS:-$ROOT/sys/class/net}"
+NOTIFY="${JUNWRT_USAGE_NOTIFY:-/usr/bin/junwrt-notify}"
+SAMPLE_EVERY=60
+FLUSH_EVERY=600
+MAX_DAYS=400
+GB=1000000000
+
+die() {
+	printf '{"error":"%s"}\n' "$1"
+	exit 1
+}
+
+clean() {
+	printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-"${2:-120}"
+}
+
+num() {
+	case "$1" in
+		''|*[!0-9]*) printf '0' ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+within() { # VALUE MIN MAX DEFAULT
+	case "$1" in
+		''|*[!0-9]*) printf '%s' "$4"; return 0 ;;
+	esac
+	if [ "$1" -lt "$2" ] || [ "$1" -gt "$3" ]; then
+		printf '%s' "$4"
+	else
+		printf '%s' "$1"
+	fi
+}
+
+today() {
+	if [ -n "$JUNWRT_USAGE_TODAY" ]; then
+		printf '%s' "$JUNWRT_USAGE_TODAY"
+	else
+		date +%Y%m%d
+	fi
+}
+
+load_config() {
+	local line key value
+	CAP_GB=0; WARN_PCT=80; RESET_DAY=1; IFACE=wan
+	while IFS= read -r line; do
+		case "$line" in
+			"$CONFIG.main."*) ;;
+			*) continue ;;
+		esac
+		key="${line#"$CONFIG.main."}"
+		value="${key#*=}"
+		key="${key%%=*}"
+		value="${value#\'}"
+		value="${value%\'}"
+		case "$key" in
+			cap_gb) CAP_GB="$(within "$value" 0 100000 0)" ;;
+			warn_pct) WARN_PCT="$(within "$value" 50 99 80)" ;;
+			reset_day) RESET_DAY="$(within "$value" 1 28 1)" ;;
+			iface) case "$value" in ''|*[!A-Za-z0-9_]*) ;; *) IFACE="$value" ;; esac ;;
+		esac
+	done <<EOF
+$(uci -q show "$CONFIG.main" 2>/dev/null)
+EOF
+	return 0
+}
+
+wan_device() {
+	local device
+	device="$(ifstatus "$1" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null | head -n 1)"
+	case "$device" in
+		''|br-lan|lo|*[!A-Za-z0-9_.-]*) return 1 ;;
+	esac
+	printf '%s' "$device"
+}
+
+# days_from_civil Y M D -> days since 1970-01-01 (proleptic Gregorian), integer math only.
+days_from_civil() {
+	local y="$1" m="$2" d="$3" era yoe doy doe
+	[ "$m" -le 2 ] && y=$((y - 1))
+	era=$((y / 400))
+	yoe=$((y - era * 400))
+	if [ "$m" -gt 2 ]; then
+		doy=$(((153 * (m - 3) + 2) / 5 + d - 1))
+	else
+		doy=$(((153 * (m + 9) + 2) / 5 + d - 1))
+	fi
+	doe=$((yoe * 365 + yoe / 4 - yoe / 100 + doy))
+	printf '%s' $((era * 146097 + doe - 719468))
+}
+
+# Sets PERIOD_START / PERIOD_NEXT (YYYYMMDD) for the billing period containing today.
+period_bounds() {
+	local t="$1" y m d py pm ny nm
+	y=$((t / 10000))
+	m=$(((t / 100) % 100))
+	d=$((t % 100))
+	py=$y; pm=$m
+	if [ "$d" -lt "$RESET_DAY" ]; then
+		pm=$((m - 1))
+		if [ "$pm" -lt 1 ]; then pm=12; py=$((y - 1)); fi
+	fi
+	ny=$py; nm=$((pm + 1))
+	if [ "$nm" -gt 12 ]; then nm=1; ny=$((py + 1)); fi
+	PERIOD_START=$((py * 10000 + pm * 100 + RESET_DAY))
+	PERIOD_NEXT=$((ny * 10000 + nm * 100 + RESET_DAY))
+}
+
+day_index() { # YYYYMMDD -> day number
+	days_from_civil "$(($1 / 10000))" "$((($1 / 100) % 100))" "$(($1 % 100))"
+}
+
+# merge_pending: folds the RAM counters into the persistent daily file.
+merge_pending() {
+	local pday prx ptx d r t found=0 tmp="$HISTORY.tmp"
+	[ -s "$PENDING" ] || return 0
+	read -r pday prx ptx < "$PENDING"
+	case "$pday" in ''|*[!0-9]*) return 0 ;; esac
+	mkdir -p "$DATA_DIR" 2>/dev/null || return 1
+	{
+		if [ -f "$HISTORY" ]; then
+			while read -r d r t; do
+				case "$d" in ''|*[!0-9]*) continue ;; esac
+				if [ "$d" = "$pday" ]; then
+					r=$(($(num "$r") + $(num "$prx")))
+					t=$(($(num "$t") + $(num "$ptx")))
+					found=1
+				fi
+				printf '%s %s %s\n' "$d" "$(num "$r")" "$(num "$t")"
+			done < "$HISTORY"
+		fi
+		[ "$found" = 1 ] || printf '%s %s %s\n' "$pday" "$(num "$prx")" "$(num "$ptx")"
+	} | sort | tail -n "$MAX_DAYS" > "$tmp" && mv -f "$tmp" "$HISTORY" && rm -f "$PENDING"
+}
+
+# add_pending DAY RX TX: accumulates; a new day first flushes the previous one.
+add_pending() {
+	local pday prx ptx
+	if [ -s "$PENDING" ]; then
+		read -r pday prx ptx < "$PENDING"
+		if [ "$pday" != "$1" ]; then
+			merge_pending
+			pday=""
+		fi
+	fi
+	if [ "$pday" = "$1" ]; then
+		prx=$(($(num "$prx") + $2))
+		ptx=$(($(num "$ptx") + $3))
+	else
+		prx=$2
+		ptx=$3
+	fi
+	printf '%s %s %s\n' "$1" "$prx" "$ptx" > "$PENDING.tmp" && mv -f "$PENDING.tmp" "$PENDING"
+}
+
+# sample: one accounting step against the kernel counters of the cellular device.
+sample() {
+	local dev rx tx ldev lrx ltx drx dtx
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	dev="$(wan_device "$IFACE")" || return 0
+	rx="$(num "$(cat "$SYS_NET/$dev/statistics/rx_bytes" 2>/dev/null)")"
+	tx="$(num "$(cat "$SYS_NET/$dev/statistics/tx_bytes" 2>/dev/null)")"
+	drx=0; dtx=0
+	if [ -s "$LAST" ]; then
+		read -r ldev lrx ltx < "$LAST"
+		if [ "$ldev" = "$dev" ]; then
+			# A smaller counter means the device was recreated: count what it carried since then.
+			if [ "$rx" -ge "$(num "$lrx")" ]; then drx=$((rx - $(num "$lrx"))); else drx=$rx; fi
+			if [ "$tx" -ge "$(num "$ltx")" ]; then dtx=$((tx - $(num "$ltx"))); else dtx=$tx; fi
+		fi
+	fi
+	printf '%s %s %s\n' "$dev" "$rx" "$tx" > "$LAST.tmp" && mv -f "$LAST.tmp" "$LAST"
+	if [ "$drx" -gt 0 ] || [ "$dtx" -gt 0 ]; then
+		add_pending "$(today)" "$drx" "$dtx"
+	fi
+	date +%s > "$STAMP"
+}
+
+# totals PERIOD_START: sets USED_RX / USED_TX for the billing period (history plus unflushed counters).
+totals() {
+	local d r t pday prx ptx
+	USED_RX=0; USED_TX=0
+	if [ -f "$HISTORY" ]; then
+		while read -r d r t; do
+			case "$d" in ''|*[!0-9]*) continue ;; esac
+			if [ "$d" -ge "$1" ]; then
+				USED_RX=$((USED_RX + $(num "$r")))
+				USED_TX=$((USED_TX + $(num "$t")))
+			fi
+		done < "$HISTORY"
+	fi
+	if [ -s "$PENDING" ]; then
+		read -r pday prx ptx < "$PENDING"
+		case "$pday" in ''|*[!0-9]*) ;; *)
+			if [ "$pday" -ge "$1" ]; then
+				USED_RX=$((USED_RX + $(num "$prx")))
+				USED_TX=$((USED_TX + $(num "$ptx")))
+			fi ;;
+		esac
+	fi
+}
+
+cap_state() { # percent -> ok|warn|over|off
+	if [ "$CAP_GB" -le 0 ]; then
+		printf 'off'
+	elif [ "$1" -ge 100 ]; then
+		printf 'over'
+	elif [ "$1" -ge "$WARN_PCT" ]; then
+		printf 'warn'
+	else
+		printf 'ok'
+	fi
+}
+
+notify() {
+	[ -x "$NOTIFY" ] || return 0
+	"$NOTIFY" event usage "Data usage" "$1" >/dev/null 2>&1 &
+}
+
+# check_cap: one alert per billing period and level, remembered across reboots.
+check_cap() {
+	local t cap percent state last_period last_level
+	[ "$CAP_GB" -gt 0 ] || return 0
+	t="$(today)"
+	period_bounds "$t"
+	totals "$PERIOD_START"
+	cap=$((CAP_GB * GB))
+	percent=$(((USED_RX + USED_TX) * 100 / cap))
+	state="$(cap_state "$percent")"
+	[ "$state" = ok ] && return 0
+	last_period=""; last_level=""
+	[ -f "$ALERT" ] && read -r last_period last_level < "$ALERT"
+	if [ "$last_period" = "$PERIOD_START" ] && { [ "$last_level" = over ] || [ "$last_level" = "$state" ]; }; then
+		return 0
+	fi
+	mkdir -p "$DATA_DIR" 2>/dev/null
+	printf '%s %s\n' "$PERIOD_START" "$state" > "$ALERT"
+	logger -t junwrt-usage "Data usage at $percent% of the ${CAP_GB} GB limit ($state)" 2>/dev/null
+	if [ "$state" = over ]; then
+		notify "Monthly data limit reached: $percent% of $CAP_GB GB used"
+	else
+		notify "Data usage warning: $percent% of the $CAP_GB GB limit used"
+	fi
+}
+
+run_daemon() {
+	local loops=0 last_flush
+	last_flush="$(date +%s)"
+	trap 'merge_pending; exit 0' TERM INT
+	while :; do
+		load_config
+		sample
+		check_cap
+		if [ $(($(date +%s) - last_flush)) -ge "$FLUSH_EVERY" ]; then
+			merge_pending
+			last_flush="$(date +%s)"
+		fi
+		loops=$((loops + 1))
+		if [ -n "$JUNWRT_USAGE_LOOPS" ] && [ "$loops" -ge "$JUNWRT_USAGE_LOOPS" ]; then
+			merge_pending
+			break
+		fi
+		sleep "$SAMPLE_EVERY" &
+		wait $!
+	done
+}
+
+days_json() {
+	local first=1 d r t
+	printf '['
+	if [ -f "$HISTORY" ]; then
+		tail -n 30 "$HISTORY" | while read -r d r t; do
+			case "$d" in ''|*[!0-9]*) continue ;; esac
+			printf '%s{"d":%s,"rx":%s,"tx":%s}' "$([ "$first" = 1 ] || printf ',')" "$d" "$(num "$r")" "$(num "$t")"
+			first=0
+		done
+	fi
+	printf ']'
+}
+
+status() {
+	local t cap percent state dev stamp running=0 now elapsed span left projected total pday prx ptx since trx ttx
+	load_config
+	t="$(today)"
+	period_bounds "$t"
+	totals "$PERIOD_START"
+	total=$((USED_RX + USED_TX))
+	cap=$((CAP_GB * GB))
+	percent=0
+	[ "$cap" -gt 0 ] && percent=$((total * 100 / cap))
+	state="$(cap_state "$percent")"
+	elapsed=$(($(day_index "$t") - $(day_index "$PERIOD_START") + 1))
+	span=$(($(day_index "$PERIOD_NEXT") - $(day_index "$PERIOD_START")))
+	left=$(($(day_index "$PERIOD_NEXT") - $(day_index "$t")))
+	[ "$elapsed" -ge 1 ] || elapsed=1
+	projected=$((total * span / elapsed))
+	trx=0; ttx=0
+	if [ -f "$HISTORY" ]; then
+		while read -r pday prx ptx; do
+			[ "$pday" = "$t" ] && { trx=$(num "$prx"); ttx=$(num "$ptx"); }
+		done < "$HISTORY"
+	fi
+	if [ -s "$PENDING" ]; then
+		read -r pday prx ptx < "$PENDING"
+		if [ "$pday" = "$t" ]; then
+			trx=$((trx + $(num "$prx")))
+			ttx=$((ttx + $(num "$ptx")))
+		fi
+	fi
+	since=""
+	[ -f "$HISTORY" ] && since="$(head -n 1 "$HISTORY" | cut -d' ' -f1)"
+	dev="$(wan_device "$IFACE")"
+	now="$(date +%s)"
+	stamp=0
+	[ -f "$STAMP" ] && stamp="$(num "$(cat "$STAMP" 2>/dev/null)")"
+	[ "$stamp" -gt 0 ] && [ $((now - stamp)) -le $((SAMPLE_EVERY * 3)) ] && running=1
+	printf '{"running":%s,"iface":"%s","device":"%s","state":"%s","percent":%s,' "$running" "$IFACE" "$(clean "$dev" 24)" "$state" "$percent"
+	printf '"cap_bytes":%s,"cap_gb":%s,"warn_pct":%s,"reset_day":%s,' "$cap" "$CAP_GB" "$WARN_PCT" "$RESET_DAY"
+	printf '"period_start":%s,"period_next":%s,"days_elapsed":%s,"days_left":%s,' "$PERIOD_START" "$PERIOD_NEXT" "$elapsed" "$left"
+	printf '"rx":%s,"tx":%s,"total":%s,"projected":%s,"today_rx":%s,"today_tx":%s,"today":%s,"since":"%s","now":%s,' \
+		"$USED_RX" "$USED_TX" "$total" "$projected" "$trx" "$ttx" "$t" "$(clean "$since" 8)" "$now"
+	printf '"days":%s}\n' "$(days_json)"
+}
+
+in_range() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+
+save() {
+	local arg key value
+	[ $# -gt 0 ] || die "Nothing to save."
+	for arg in "$@"; do
+		case "$arg" in
+			*=*) ;;
+			*) die "Use key=value pairs." ;;
+		esac
+		key="${arg%%=*}"
+		value="${arg#*=}"
+		case "$key" in
+			cap_gb) in_range "$value" 0 100000 || die "The limit must be 0-100000 GB (0 turns it off)." ;;
+			warn_pct) in_range "$value" 50 99 || die "The warning level must be 50-99%." ;;
+			reset_day) in_range "$value" 1 28 || die "The reset day must be 1-28." ;;
+			iface)
+				case "$value" in ''|*[!A-Za-z0-9_]*) die "Invalid interface name." ;; esac
+				[ "${#value}" -le 15 ] || die "Invalid interface name." ;;
+			*) die "Unknown setting: $(clean "$key" 24)." ;;
+		esac
+	done
+	[ -f "$CONF_FILE" ] || touch "$CONF_FILE" 2>/dev/null || die "Could not create the configuration."
+	uci -q get "$CONFIG.main" >/dev/null 2>&1 || uci -q set "$CONFIG.main=usage" || die "Could not create the configuration section."
+	for arg in "$@"; do
+		uci -q set "$CONFIG.main.${arg%%=*}=${arg#*=}" || die "Could not save ${arg%%=*}."
+	done
+	uci -q commit "$CONFIG" || die "Could not commit the configuration."
+	printf '{"success":true}\n'
+}
+
+reset() {
+	rm -f "$HISTORY" "$PENDING" "$LAST" "$ALERT" 2>/dev/null
+	printf '{"success":true}\n'
+}
+
+case "${1:-}" in
+	status) status ;;
+	save) shift; save "$@" ;;
+	reset) reset ;;
+	sample) load_config; sample; check_cap ;;
+	flush) merge_pending ;;
+	daemon|run) run_daemon ;;
+	*) echo "Usage: $0 {status|save key=value...|reset|sample|flush|daemon}"; exit 2 ;;
+esac

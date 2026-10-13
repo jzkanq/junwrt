@@ -1,0 +1,15 @@
+{
+  "admin/modem/support": {
+    "title": "Support",
+    "order": 53,
+    "action": {
+      "type": "view",
+      "path": "modem/support"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-support"
+      ]
+    }
+  }
+}

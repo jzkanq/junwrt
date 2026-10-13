@@ -1,0 +1,35 @@
+{
+  "luci-app-junwrt-notify": {
+    "description": "Send Telegram, ntfy or webhook alerts for connection, cell and data events",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-notify status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-notify save *": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-notify test": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-notify clear-log": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

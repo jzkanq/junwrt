@@ -1,0 +1,381 @@
+#!/bin/sh
+# JunWRT Connection Guard: opt-in recovery for a hung cellular data session.
+# Probes the cellular WAN and escalates re-dial -> modem radio cycle -> optional reboot.
+
+ROOT="${JUNWRT_GUARD_ROOT:-}" # test hook: prefix for the paths below
+CONFIG=junwrt-guard
+CONF_FILE="$ROOT/etc/config/$CONFIG"
+RUN_DIR="$ROOT/var/run/junwrt-guard"
+STATE="$RUN_DIR/state"
+EVENTS="$RUN_DIR/events"
+UPTIME_FILE="$ROOT/proc/uptime"
+MODEM_STATUS="${JUNWRT_GUARD_MODEM:-/bin/modem_status}"
+NOTIFY="${JUNWRT_GUARD_NOTIFY:-/usr/bin/junwrt-notify}"
+MIN_UPTIME=900 # never reboot a router that booted less than 15 minutes ago
+MAX_EVENTS=40
+
+die() {
+	printf '{"error":"%s"}\n' "$1"
+	exit 1
+}
+
+clean() {
+	printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-"${2:-160}"
+}
+
+num() {
+	case "$1" in
+		''|*[!0-9]*) printf '0' ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+now() {
+	date +%s
+}
+
+# within VALUE MIN MAX DEFAULT: VALUE when it is a number in range, else DEFAULT.
+within() {
+	case "$1" in
+		''|*[!0-9]*) printf '%s' "$4"; return 0 ;;
+	esac
+	if [ "$1" -lt "$2" ] || [ "$1" -gt "$3" ]; then
+		printf '%s' "$4"
+	else
+		printf '%s' "$1"
+	fi
+}
+
+# One `uci show` call per cycle keeps the idle loop light on the router.
+load_config() {
+	local line key value
+	ENABLED=0; INTERVAL=30; FAILURES=4; COOLDOWN=300; GRACE=60; MAX_PER_DAY=6
+	REDIAL=1; RADIO=1; REBOOT=0; TARGETS='1.1.1.1 8.8.8.8'; IFACE=wan
+	while IFS= read -r line; do
+		case "$line" in
+			"$CONFIG.main."*) ;;
+			*) continue ;;
+		esac
+		key="${line#"$CONFIG.main."}"
+		value="${key#*=}"
+		key="${key%%=*}"
+		value="${value#\'}"
+		value="${value%\'}"
+		case "$key" in
+			enabled) [ "$value" = 1 ] && ENABLED=1 ;;
+			interval) INTERVAL="$(within "$value" 10 600 30)" ;;
+			failures) FAILURES="$(within "$value" 2 20 4)" ;;
+			cooldown) COOLDOWN="$(within "$value" 60 3600 300)" ;;
+			grace) GRACE="$(within "$value" 10 600 60)" ;;
+			max_per_day) MAX_PER_DAY="$(within "$value" 1 24 6)" ;;
+			redial) [ "$value" = 0 ] && REDIAL=0 ;;
+			radio) [ "$value" = 0 ] && RADIO=0 ;;
+			reboot) [ "$value" = 1 ] && REBOOT=1 ;;
+			targets) [ -n "$value" ] && TARGETS="$value" ;;
+			iface) case "$value" in ''|*[!A-Za-z0-9_]*) ;; *) IFACE="$value" ;; esac ;;
+		esac
+	done <<EOF
+$(uci -q show "$CONFIG.main" 2>/dev/null)
+EOF
+	return 0
+}
+
+log_event() {
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$EVENTS" 2>/dev/null
+	tail -n "$MAX_EVENTS" "$EVENTS" > "$EVENTS.tmp" 2>/dev/null && mv -f "$EVENTS.tmp" "$EVENTS"
+	logger -t junwrt-guard "$1" 2>/dev/null
+}
+
+# Optional alert through Modem > Notifications; never blocks the guard.
+notify() {
+	[ -x "$NOTIFY" ] || return 0
+	"$NOTIFY" event guard "Connection Guard" "$1" >/dev/null 2>&1 &
+}
+
+wan_device() {
+	local device
+	device="$(ifstatus "$1" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null | head -n 1)"
+	case "$device" in
+		''|br-lan|lo|*[!A-Za-z0-9_.-]*) return 1 ;;
+	esac
+	printf '%s' "$device"
+}
+
+# probe DEVICE: success when any target answers one ping through the cellular device.
+probe() {
+	local target opt=""
+	[ -n "$1" ] && opt="-I $1"
+	for target in $(printf '%s' "$TARGETS" | tr ',' ' '); do
+		case "$target" in
+			''|*[!A-Za-z0-9.:-]*) continue ;;
+		esac
+		if ping -c 1 -W 3 $opt "$target" >/dev/null 2>&1; then
+			PROBE_TARGET="$target"
+			return 0
+		fi
+	done
+	return 1
+}
+
+write_state() {
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	printf 'state=%s\nupdated=%s\nfails=%s\nstage=%s\nlast_ok=%s\nlast_action=%s\nlast_action_time=%s\nactions=%s\ndevice=%s\niface=%s\n' \
+		"$1" "$(now)" "$fails" "$stage" "$last_ok" "$last_action" "$last_action_time" "$actions" "$dev" "$IFACE" \
+		> "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE"
+}
+
+# Steps: 1 re-dial the interface, 2 restart the modem radio, 3 reboot.
+stage_enabled() {
+	case "$1" in
+		1) [ "$REDIAL" = 1 ] ;;
+		2) [ "$RADIO" = 1 ] ;;
+		3) [ "$REBOOT" = 1 ] ;;
+		*) return 1 ;;
+	esac
+}
+
+# next_stage CURRENT: the enabled step after CURRENT (wrapping), or 0 when every step is off.
+next_stage() {
+	local n="$1" i=0
+	while [ "$i" -lt 3 ]; do
+		n=$((n + 1))
+		[ "$n" -le 3 ] || n=1
+		if stage_enabled "$n"; then
+			printf '%s' "$n"
+			return 0
+		fi
+		i=$((i + 1))
+	done
+	printf '0'
+}
+
+recover() {
+	local next uptime
+	next="$(next_stage "$stage")"
+	if [ "$next" = 0 ]; then
+		log_event "The connection is down, but every recovery step is turned off"
+		return 1
+	fi
+	case "$next" in
+		1)
+			log_event "$fails checks failed: re-dialing $IFACE"
+			notify "No internet for $fails checks: re-dialing $IFACE"
+			ifdown "$IFACE" >/dev/null 2>&1
+			sleep 3
+			ifup "$IFACE" >/dev/null 2>&1
+			last_action=redial
+			;;
+		2)
+			log_event "Still offline: restarting the modem radio"
+			notify "Still offline after re-dial: restarting the modem radio"
+			"$MODEM_STATUS" --at_cmd "AT+CFUN=4" >/dev/null 2>&1
+			sleep 2
+			"$MODEM_STATUS" --at_cmd "AT+CFUN=1" >/dev/null 2>&1
+			last_action=radio
+			;;
+		3)
+			uptime="$(cut -d. -f1 "$UPTIME_FILE" 2>/dev/null)"
+			if [ "$(num "$uptime")" -lt "$MIN_UPTIME" ]; then
+				log_event "Reboot skipped: the router started less than $((MIN_UPTIME / 60)) minutes ago"
+				stage=3
+				return 0
+			fi
+			log_event "Still offline: rebooting the router"
+			notify "Still offline after every recovery step: rebooting the router"
+			last_action=reboot
+			stage=3
+			actions=$((actions + 1))
+			last_action_time="$(now)"
+			write_state recovering
+			sync
+			reboot
+			return 0
+			;;
+	esac
+	stage="$next"
+	actions=$((actions + 1))
+	last_action_time="$(now)"
+}
+
+run_daemon() {
+	local fails=0 stage=0 last_ok=0 last_action="" last_action_time=0 actions=0 dev="" today day t last_attempt=0 limit_logged=0 loops=0
+	day="$(date +%Y%m%d)"
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	log_event "Connection Guard service started"
+	while :; do
+		load_config
+		today="$(date +%Y%m%d)"
+		if [ "$today" != "$day" ]; then
+			day="$today"
+			actions=0
+			limit_logged=0
+		fi
+		dev="$(wan_device "$IFACE")"
+		if [ "$ENABLED" != 1 ]; then
+			write_state disabled
+			sleep 15
+		else
+			if probe "$dev"; then
+				if [ "$fails" -gt 0 ]; then
+					log_event "Connection restored after $fails failed checks"
+					notify "Internet is back after $fails failed checks"
+				fi
+				fails=0
+				stage=0
+				last_ok="$(now)"
+				write_state ok
+			else
+				fails=$((fails + 1))
+				write_state degraded
+				if [ "$fails" -ge "$FAILURES" ]; then
+					t="$(now)"
+					if [ $((t - last_attempt)) -ge "$COOLDOWN" ]; then
+						if [ "$actions" -ge "$MAX_PER_DAY" ]; then
+							if [ "$limit_logged" != 1 ]; then
+								log_event "Daily limit of $MAX_PER_DAY recovery actions reached; waiting for tomorrow"
+								limit_logged=1
+							fi
+						else
+							last_attempt="$t"
+							write_state recovering
+							recover
+							write_state recovering
+							sleep "$GRACE"
+						fi
+					fi
+				fi
+			fi
+			sleep "$INTERVAL"
+		fi
+		loops=$((loops + 1))
+		[ -z "$JUNWRT_GUARD_LOOPS" ] || [ "$loops" -lt "$JUNWRT_GUARD_LOOPS" ] || break
+	done
+}
+
+events_json() {
+	local line first=1
+	printf '['
+	if [ -f "$EVENTS" ]; then
+		tail -n 20 "$EVENTS" | while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			printf '%s"%s"' "$([ "$first" = 1 ] || printf ',')" "$(clean "$line" 200)"
+			first=0
+		done
+	fi
+	printf ']'
+}
+
+status() {
+	local state="" updated=0 fails=0 stage=0 last_ok=0 last_action="" last_action_time=0 actions=0 dev="" key value running=0 t
+	load_config
+	if [ -f "$STATE" ]; then
+		while IFS='=' read -r key value; do
+			case "$key" in
+				state) state="$(clean "$value" 24)" ;;
+				updated) updated="$(num "$value")" ;;
+				fails) fails="$(num "$value")" ;;
+				stage) stage="$(num "$value")" ;;
+				last_ok) last_ok="$(num "$value")" ;;
+				last_action) last_action="$(clean "$value" 24)" ;;
+				last_action_time) last_action_time="$(num "$value")" ;;
+				actions) actions="$(num "$value")" ;;
+			esac
+		done < "$STATE"
+	fi
+	dev="$(wan_device "$IFACE")"
+	t="$(now)"
+	if [ "$updated" -gt 0 ] && [ $((t - updated)) -le $((INTERVAL * 3 + GRACE + 30)) ]; then
+		running=1
+	fi
+	if [ "$ENABLED" != 1 ]; then
+		state=disabled
+	elif [ "$running" != 1 ]; then
+		state=stopped
+	fi
+	printf '{"enabled":%s,"running":%s,"state":"%s","iface":"%s","device":"%s","fails":%s,"stage":%s,' \
+		"$ENABLED" "$running" "$state" "$IFACE" "$(clean "$dev" 24)" "$fails" "$stage"
+	printf '"last_ok":%s,"last_action":"%s","last_action_time":%s,"actions":%s,"now":%s,' \
+		"$last_ok" "$last_action" "$last_action_time" "$actions" "$t"
+	printf '"config":{"interval":%s,"failures":%s,"cooldown":%s,"grace":%s,"max_per_day":%s,"redial":%s,"radio":%s,"reboot":%s,"targets":"%s","iface":"%s"},' \
+		"$INTERVAL" "$FAILURES" "$COOLDOWN" "$GRACE" "$MAX_PER_DAY" "$(num "$REDIAL")" "$(num "$RADIO")" "$(num "$REBOOT")" \
+		"$(clean "$(printf '%s' "$TARGETS" | tr ',' ' ')" 120)" "$IFACE"
+	printf '"events":%s}\n' "$(events_json)"
+}
+
+# check: one probe, no recovery action.
+check() {
+	local dev result=false target=""
+	load_config
+	dev="$(wan_device "$IFACE")"
+	if probe "$dev"; then
+		result=true
+		target="$PROBE_TARGET"
+	fi
+	printf '{"ok":%s,"device":"%s","target":"%s","time":%s}\n' "$result" "$(clean "$dev" 24)" "$(clean "$target" 64)" "$(now)"
+}
+
+valid_target_list() {
+	local item count=0
+	for item in $(printf '%s' "$1" | tr ',' ' '); do
+		case "$item" in
+			''|*[!A-Za-z0-9.:-]*) return 1 ;;
+		esac
+		[ "${#item}" -le 63 ] || return 1
+		count=$((count + 1))
+	done
+	[ "$count" -ge 1 ] && [ "$count" -le 4 ]
+}
+
+in_range() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+
+save() {
+	local arg key value
+	[ $# -gt 0 ] || die "Nothing to save."
+	for arg in "$@"; do
+		case "$arg" in
+			*=*) ;;
+			*) die "Use key=value pairs." ;;
+		esac
+		key="${arg%%=*}"
+		value="${arg#*=}"
+		case "$key" in
+			enabled|redial|radio|reboot)
+				case "$value" in 0|1) ;; *) die "$key must be 0 or 1." ;; esac ;;
+			interval) in_range "$value" 10 600 || die "Check interval must be 10-600 seconds." ;;
+			failures) in_range "$value" 2 20 || die "Failed checks must be 2-20." ;;
+			cooldown) in_range "$value" 60 3600 || die "Cooldown must be 60-3600 seconds." ;;
+			grace) in_range "$value" 10 600 || die "Wait after an action must be 10-600 seconds." ;;
+			max_per_day) in_range "$value" 1 24 || die "Daily limit must be 1-24." ;;
+			targets) valid_target_list "$value" || die "Enter 1-4 targets (IP addresses or host names)." ;;
+			iface)
+				case "$value" in ''|*[!A-Za-z0-9_]*) die "Invalid interface name." ;; esac
+				[ "${#value}" -le 15 ] || die "Invalid interface name." ;;
+			*) die "Unknown setting: $(clean "$key" 24)." ;;
+		esac
+	done
+	[ -f "$CONF_FILE" ] || touch "$CONF_FILE" 2>/dev/null || die "Could not create the configuration."
+	uci -q get "$CONFIG.main" >/dev/null 2>&1 || uci -q set "$CONFIG.main=guard" || die "Could not create the configuration section."
+	for arg in "$@"; do
+		key="${arg%%=*}"
+		value="${arg#*=}"
+		[ "$key" = targets ] && value="$(printf '%s' "$value" | tr ',' ' ')"
+		uci -q set "$CONFIG.main.$key=$value" || die "Could not save $key."
+	done
+	uci -q commit "$CONFIG" || die "Could not commit the configuration."
+	printf '{"success":true}\n'
+}
+
+case "${1:-}" in
+	status) status ;;
+	check) check ;;
+	save) shift; save "$@" ;;
+	clear-log) printf '' > "$EVENTS" 2>/dev/null; printf '{"success":true}\n' ;;
+	daemon|run) run_daemon ;;
+	*) echo "Usage: $0 {status|check|save key=value...|clear-log|daemon}"; exit 2 ;;
+esac

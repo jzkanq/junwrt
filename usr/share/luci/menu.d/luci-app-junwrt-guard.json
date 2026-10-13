@@ -1,0 +1,15 @@
+{
+  "admin/modem/guard": {
+    "title": "Connection Guard",
+    "order": 46,
+    "action": {
+      "type": "view",
+      "path": "modem/guard"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-guard"
+      ]
+    }
+  }
+}

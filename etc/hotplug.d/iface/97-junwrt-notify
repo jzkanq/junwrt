@@ -1,0 +1,10 @@
+#!/bin/sh
+# Tell Modem > Notifications when the cellular interface goes down or comes back.
+[ "$INTERFACE" = wan ] || exit 0
+case "$ACTION" in
+	ifup|ifdown) ;;
+	*) exit 0 ;;
+esac
+[ -x /usr/bin/junwrt-notify ] || exit 0
+/usr/bin/junwrt-notify wan-state "$ACTION" >/dev/null 2>&1 &
+exit 0

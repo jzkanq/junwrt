@@ -1,0 +1,31 @@
+{
+  "luci-app-junwrt-support": {
+    "description": "Show the installed WebUI build, check its files and download a diagnostics bundle",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-support status": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-support verify": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-support bundle": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {}
+    }
+  }
+}

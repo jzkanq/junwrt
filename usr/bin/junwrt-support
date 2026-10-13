@@ -1,0 +1,145 @@
+#!/bin/sh
+# JunWRT support helper: the installed WebUI build, a file check against the installer manifest and a
+# diagnostics bundle (secrets removed) that can be attached to a support request.
+
+ROOT="${JUNWRT_SUPPORT_ROOT:-}" # test hook: prefix for the paths below
+BUILD_FILE="$ROOT/etc/junwrt-webui.build"
+MANIFEST="$ROOT/etc/junwrt-webui.manifest"
+MAX_PROBLEMS=8
+
+die() {
+	printf '{"error":"%s"}\n' "$1"
+	exit 1
+}
+
+clean() {
+	printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-"${2:-160}"
+}
+
+num() {
+	case "$1" in
+		''|*[!0-9]*) printf '0' ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+build_value() {
+	sed -n "s/^$1=//p" "$BUILD_FILE" 2>/dev/null | head -n 1 | tr -d '\r'
+}
+
+# verify: sets V_TOTAL V_OK V_CHANGED V_MISSING and V_PROBLEMS (JSON strings) from the manifest.
+verify() {
+	local sum path got listed=0
+	V_TOTAL=0; V_OK=0; V_CHANGED=0; V_MISSING=0; V_PROBLEMS=""
+	[ -f "$MANIFEST" ] || return 1
+	while read -r sum path; do
+		case "$path" in
+			/*) ;;
+			*) continue ;;
+		esac
+		V_TOTAL=$((V_TOTAL + 1))
+		if [ ! -f "$ROOT$path" ]; then
+			V_MISSING=$((V_MISSING + 1))
+			got=missing
+		else
+			got="$(sha256sum "$ROOT$path" 2>/dev/null | cut -d' ' -f1)"
+			if [ "$got" = "$sum" ]; then
+				V_OK=$((V_OK + 1))
+				continue
+			fi
+			V_CHANGED=$((V_CHANGED + 1))
+			got=changed
+		fi
+		if [ "$listed" -lt "$MAX_PROBLEMS" ]; then
+			V_PROBLEMS="${V_PROBLEMS}${V_PROBLEMS:+,}{\"path\":\"$(clean "$path" 120)\",\"state\":\"$got\"}"
+			listed=$((listed + 1))
+		fi
+	done < "$MANIFEST"
+	return 0
+}
+
+services_json() {
+	local first=1 name
+	printf '{'
+	for name in $(build_value services); do
+		case "$name" in
+			*[!A-Za-z0-9_-]*) continue ;;
+		esac
+		printf '%s"%s":%s' "$([ "$first" = 1 ] || printf ',')" "$name" \
+			"$("$ROOT/etc/init.d/$name" running >/dev/null 2>&1 && echo true || echo false)"
+		first=0
+	done
+	printf '}'
+}
+
+status() {
+	local installed=false uptime kb overlay load
+	[ -f "$BUILD_FILE" ] && installed=true
+	verify
+	uptime="$(num "$(cut -d. -f1 "$ROOT/proc/uptime" 2>/dev/null)")"
+	kb="$(sed -n 's/^MemAvailable: *\([0-9]*\) kB.*/\1/p' "$ROOT/proc/meminfo" 2>/dev/null | head -n 1)"
+	load="$(cut -d' ' -f1 "$ROOT/proc/loadavg" 2>/dev/null)"
+	overlay="$(df -k "$ROOT/overlay" 2>/dev/null | sed -n '2p' | tr -s ' ' | cut -d' ' -f4)"
+	printf '{"installed":%s,"build":{"time":"%s","epoch":%s,"payload":"%s","files":%s,"modules":"%s"},' \
+		"$installed" "$(clean "$(build_value built)" 40)" "$(num "$(build_value epoch)")" "$(clean "$(build_value payload)" 16)" \
+		"$(num "$(build_value files)")" "$(clean "$(build_value modules)" 160)"
+	printf '"verify":{"total":%s,"ok":%s,"changed":%s,"missing":%s,"problems":[%s]},' "$V_TOTAL" "$V_OK" "$V_CHANGED" "$V_MISSING" "$V_PROBLEMS"
+	printf '"system":{"uptime":%s,"load":"%s","mem_available_kb":%s,"overlay_free_kb":%s},"services":%s,"now":%s}\n' \
+		"$uptime" "$(clean "$load" 12)" "$(num "$kb")" "$(num "$overlay")" "$(services_json)" "$(date +%s)"
+}
+
+# Secrets never leave the router: option names that look like secrets lose their value, long digit
+# runs (IMEI, IMSI, ICCID) are hidden.
+redact() {
+	sed -E -e "s/^([^=]*(key|psk|password|passwd|token|secret|pin|private|auth|login)[^=]*)=.*/\1='<hidden>'/" \
+		-e 's/[0-9]{15,20}/<digits-hidden>/g'
+}
+
+collect() { # directory
+	local dir="$1"
+	{
+		echo "== build"; cat "$BUILD_FILE" 2>/dev/null
+		echo "== uname"; uname -a
+		echo "== uptime"; uptime
+		echo "== memory"; free 2>/dev/null
+		echo "== disk"; df -h 2>/dev/null
+		echo "== board"; ubus call system board 2>/dev/null
+	} > "$dir/system.txt" 2>&1
+	{
+		echo "== wan"; ifstatus wan 2>/dev/null
+		echo "== addresses"; ip addr 2>/dev/null
+		echo "== routes"; ip route 2>/dev/null
+	} 2>&1 | redact > "$dir/network.txt"
+	{ logread 2>/dev/null | tail -n 400; } | redact > "$dir/log.txt"
+	{ dmesg 2>/dev/null | tail -n 200; } | redact > "$dir/kernel.txt"
+	uci show 2>/dev/null | redact > "$dir/config.txt"
+	if [ -x "$ROOT/usr/share/3ginfo-lite/3ginfo.sh" ]; then
+		"$ROOT/usr/share/3ginfo-lite/3ginfo.sh" json 2>/dev/null | redact > "$dir/modem.txt"
+	fi
+	{
+		echo "== file check"
+		verify
+		echo "total=$V_TOTAL ok=$V_OK changed=$V_CHANGED missing=$V_MISSING"
+		echo "== services"; services_json; echo
+		echo "== speed test towers"; "$ROOT/usr/bin/junwrt-speedtest" towers 2>/dev/null
+		echo "== data usage"; "$ROOT/usr/bin/junwrt-usage" status 2>/dev/null
+		echo "== connection guard"; "$ROOT/usr/bin/junwrt-guard" status 2>/dev/null
+		echo "== security"; "$ROOT/usr/bin/junwrt-security" status 2>/dev/null
+	} 2>&1 | redact > "$dir/junwrt.txt"
+}
+
+bundle() {
+	local dir="${TMPDIR:-/tmp}/junwrt-support.$$"
+	mkdir -p "$dir" || die "Could not create a temporary folder."
+	collect "$dir"
+	tar -czf - -C "$dir" . 2>/dev/null
+	rm -rf "$dir"
+}
+
+case "${1:-}" in
+	status) status ;;
+	bundle) bundle ;;
+	verify) verify; printf '{"total":%s,"ok":%s,"changed":%s,"missing":%s}\n' "$V_TOTAL" "$V_OK" "$V_CHANGED" "$V_MISSING"
+		[ "$V_CHANGED" = 0 ] && [ "$V_MISSING" = 0 ] ;;
+	*) echo "Usage: $0 {status|verify|bundle}"; exit 2 ;;
+esac

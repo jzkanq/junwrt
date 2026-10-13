@@ -1,0 +1,87 @@
+#maincontent .jun-ui { color: #1e293b; max-width: 1080px; margin: 0 auto; font-size: 14px; line-height: 1.5; }
+#maincontent .jun-ui [hidden] { display: none !important; }
+#maincontent .jun-ui h1 { font-size: 24px !important; font-weight: 600; color: #0f172a; margin: 0 0 8px; }
+#maincontent .jun-ui h2 { font-size: 17px !important; font-weight: 600; color: #0f172a; margin: 0; padding: 0; }
+#maincontent .jun-ui h3 { font-size: 15px !important; font-weight: 600; color: #0f172a; margin: 0 0 6px; padding: 0; }
+#maincontent .jun-ui .ju-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+#maincontent .jun-ui .ju-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin: 18px 0; box-shadow: 0 1px 3px rgba(15,23,42,.04), 0 4px 12px rgba(15,23,42,.03); }
+#maincontent .jun-ui .ju-card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-bottom: 16px; }
+#maincontent .jun-ui .ju-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+#maincontent .jun-ui .ju-stat { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 16px; min-width: 0; }
+#maincontent .jun-ui .ju-label { display: block; font-size: 11px !important; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #94a3b8; }
+#maincontent .jun-ui .ju-value { display: block; margin-top: 4px; font: 600 24px/1.25 ui-monospace, Consolas, monospace; color: #1e293b; overflow-wrap: anywhere; }
+#maincontent .jun-ui .ju-value.is-text { font-size: 16px; line-height: 1.4; }
+#maincontent .jun-ui .ju-unit { margin-left: 6px; font-size: 13px !important; color: #64748b; }
+#maincontent .jun-ui .ju-mono { font: 600 13px/1.5 ui-monospace, Consolas, monospace; color: #1e293b; overflow-wrap: anywhere; }
+#maincontent .jun-ui .ju-help, #maincontent .jun-ui .ju-empty, #maincontent .jun-ui small { color: #64748b; font-size: 13px !important; line-height: 1.6; margin: 6px 0; }
+#maincontent .jun-ui .ju-pill { display: inline-flex; align-items: center; border: 1px solid #e2e8f0; border-radius: 20px; padding: 4px 12px; font-size: 12px !important; font-weight: 600; color: #94a3b8; background: #f8fafc; white-space: nowrap; }
+#maincontent .jun-ui .ju-pill.is-ok { color: #10b981; border-color: #a7f3d0; background: #e8f9f0; }
+#maincontent .jun-ui .ju-pill.is-warn { color: #b45309; border-color: #f59e0b; background: #f8fafc; }
+#maincontent .jun-ui .ju-pill.is-bad { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+#maincontent .jun-ui .ju-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
+#maincontent .jun-ui .ju-field { display: flex; flex-direction: column; gap: 8px; margin: 0 0 16px; min-width: 0; }
+#maincontent .jun-ui .ju-field.is-wide { grid-column: 1 / -1; }
+#maincontent .jun-ui .ju-field > span { font-size: 13px !important; font-weight: 600; }
+#maincontent .jun-ui input:not([type=checkbox]), #maincontent .jun-ui select, #maincontent .jun-ui textarea { box-sizing: border-box; width: 100%; max-width: none; min-height: 44px; border: 1px solid #cbd5e1; border-radius: 6px; background: #ffffff; color: #1e293b; padding: 9px 12px; font-size: 14px !important; line-height: 1.4; }
+#maincontent .jun-ui input:focus, #maincontent .jun-ui select:focus, #maincontent .jun-ui textarea:focus { outline: 2px solid #0284c7; outline-offset: 2px; }
+#maincontent .jun-ui input[type=checkbox] { accent-color: #0284c7; width: 17px; height: 17px; margin: 0 10px 0 0; flex-shrink: 0; }
+#maincontent .jun-ui .ju-check { display: flex; align-items: center; min-height: 44px; font-size: 14px !important; margin: 0 0 6px; }
+#maincontent .jun-ui .ju-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+#maincontent .jun-ui .ju-button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: 44px; border-radius: 6px !important; font-size: 12px !important; font-weight: 600 !important; padding: 6px 14px !important; cursor: pointer; text-decoration: none !important; }
+#maincontent .jun-ui .ju-primary { background: #0284c7 !important; color: #ffffff !important; border: 1px solid #0284c7 !important; }
+#maincontent .jun-ui .ju-primary:hover { background: #0369a1 !important; }
+#maincontent .jun-ui .ju-secondary { background: #ffffff !important; color: #334155 !important; border: 1px solid #cbd5e1 !important; }
+#maincontent .jun-ui .ju-secondary:hover { background: #f1f5f9 !important; }
+#maincontent .jun-ui .ju-danger { background: #ef4444 !important; color: #ffffff !important; border: 1px solid #ef4444 !important; }
+#maincontent .jun-ui .ju-danger:hover { background: #dc2626 !important; }
+#maincontent .jun-ui .ju-button:focus-visible { outline: 2px solid #0284c7; outline-offset: 2px; }
+#maincontent .jun-ui button:disabled { opacity: .6; cursor: not-allowed; }
+#maincontent .jun-ui .ju-message { font-size: 13px !important; margin: 12px 0 0; }
+#maincontent .jun-ui .ju-message:empty { display: none; }
+#maincontent .jun-ui .ju-notice, #maincontent .jun-ui .ju-message.is-error { border-left: 3px solid #f59e0b; padding: 12px; background: #f8fafc; color: #92400e; font-size: 13px !important; margin: 12px 0; }
+#maincontent .jun-ui .ju-list { display: flex; flex-direction: column; }
+#maincontent .jun-ui .ju-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid #e2e8f0; min-width: 0; }
+#maincontent .jun-ui .ju-row:last-child { border-bottom: 0; }
+#maincontent .jun-ui .ju-row-main { min-width: 0; flex: 1 1 auto; }
+#maincontent .jun-ui .ju-log { margin: 0; padding: 0; list-style: none; font: 500 12px/1.7 ui-monospace, Consolas, monospace; color: #334155; max-height: 280px; overflow: auto; }
+#maincontent .jun-ui .ju-log li { padding: 2px 0; overflow-wrap: anywhere; }
+#maincontent .jun-ui .ju-meter { height: 12px; margin: 10px 0 16px; border-radius: 6px; background: #e2e8f0; overflow: hidden; }
+#maincontent .jun-ui .ju-meter-fill { height: 100%; width: 0; background: #0284c7; border-radius: 6px; transition: width .4s ease; }
+#maincontent .jun-ui .ju-meter-fill.is-warn { background: #f59e0b; }
+#maincontent .jun-ui .ju-meter-fill.is-over { background: #ef4444; }
+#maincontent .jun-ui .ju-bars { display: flex; align-items: flex-end; gap: 3px; height: 110px; }
+#maincontent .jun-ui .ju-bar { flex: 1 1 0; min-width: 4px; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
+#maincontent .jun-ui .ju-bar-fill { background: #0284c7; border-radius: 3px 3px 0 0; min-height: 2px; }
+#maincontent .jun-ui .ju-bar.is-today .ju-bar-fill { background: #10b981; }
+#maincontent .jun-ui .ju-details { font-size: 13px !important; margin: 16px 0; }
+#maincontent .jun-ui .ju-details summary { cursor: pointer; color: #64748b; padding: 10px 0; }
+html[data-theme=dark] #maincontent .jun-ui { color: #e8eaed; color-scheme: dark; }
+html[data-theme=dark] #maincontent .jun-ui h1, html[data-theme=dark] #maincontent .jun-ui h2, html[data-theme=dark] #maincontent .jun-ui h3 { color: #e8eaed; }
+html[data-theme=dark] #maincontent .jun-ui .ju-card { background: #292a2d; border-color: #3f4044; box-shadow: none; }
+html[data-theme=dark] #maincontent .jun-ui .ju-stat { background: #35363a; border-color: #3f4044; }
+html[data-theme=dark] #maincontent .jun-ui .ju-label { color: #9aa0a6; }
+html[data-theme=dark] #maincontent .jun-ui .ju-value, html[data-theme=dark] #maincontent .jun-ui .ju-mono { color: #e8eaed; }
+html[data-theme=dark] #maincontent .jun-ui .ju-unit, html[data-theme=dark] #maincontent .jun-ui .ju-help, html[data-theme=dark] #maincontent .jun-ui .ju-empty, html[data-theme=dark] #maincontent .jun-ui small, html[data-theme=dark] #maincontent .jun-ui .ju-details summary { color: #c4c7cc; }
+html[data-theme=dark] #maincontent .jun-ui .ju-log { color: #c4c7cc; }
+html[data-theme=dark] #maincontent .jun-ui .ju-row { border-color: #3f4044; }
+html[data-theme=dark] #maincontent .jun-ui input:not([type=checkbox]), html[data-theme=dark] #maincontent .jun-ui select, html[data-theme=dark] #maincontent .jun-ui textarea { background: #35363a; border-color: #5a5d63; color: #e8eaed; }
+html[data-theme=dark] #maincontent .jun-ui .ju-pill { color: #c4c7cc; border-color: #5a5d63; background: #35363a; }
+html[data-theme=dark] #maincontent .jun-ui .ju-pill.is-ok { color: #6fd49a; }
+html[data-theme=dark] #maincontent .jun-ui .ju-pill.is-warn { color: #fbbf24; }
+html[data-theme=dark] #maincontent .jun-ui .ju-pill.is-bad { color: #f87171; }
+html[data-theme=dark] #maincontent .jun-ui .ju-secondary { background: #35363a !important; color: #e8eaed !important; border-color: #5a5d63 !important; }
+html[data-theme=dark] #maincontent .jun-ui .ju-secondary:hover { background: #3f4044 !important; }
+html[data-theme=dark] #maincontent .jun-ui .ju-notice, html[data-theme=dark] #maincontent .jun-ui .ju-message.is-error { background: #35363a; color: #fbbf24; }
+html[data-theme=dark] #maincontent .jun-ui .ju-meter { background: #3f4044; }
+@media (max-width: 800px) {
+    #maincontent .jun-ui .ju-form { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+    #maincontent .jun-ui .ju-card { padding: 18px; }
+    #maincontent .jun-ui .ju-header { flex-direction: column; gap: 4px; }
+    #maincontent .jun-ui .ju-row { flex-direction: column; gap: 8px; }
+    #maincontent .jun-ui .ju-actions .ju-button { flex: 1 1 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+    #maincontent .jun-ui .ju-meter-fill { transition: none; }
+}

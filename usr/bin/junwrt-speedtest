@@ -17,6 +17,7 @@ WINDOW=10
 DOWN_BYTES=50000000
 UP_MAX_BLOCKS=150
 MAX_HISTORY=50
+NOTIFY="$ROOT/usr/bin/junwrt-notify"
 TAB="$(printf '\t')"
 
 fail() {
@@ -254,6 +255,8 @@ run_test() {
 	phase saving "Saving the result..."
 	save_result || { abort "Could not save the speed test result."; return 1; }
 	DONE=1
+	# Modem > Notifications decides whether this result is slow enough to report.
+	[ -x "$NOTIFY" ] && "$NOTIFY" speed-result "$DOWN" "$UP" "$LATENCY" >/dev/null 2>&1 &
 	echo "Download $DOWN Mbps, upload $UP Mbps, latency $LATENCY ms, jitter $JITTER ms"
 	echo "Server ${SERVER:-unknown}, IPv${IPVER:-?}, $DATA_MB MB used"
 	echo "Cell ${MODE:-unknown}, PCI ${PCI:--}, RSRP ${RSRP:--}, SINR ${SINR:--}"

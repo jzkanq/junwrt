@@ -1,0 +1,363 @@
+#!/bin/sh
+# ==============================================================================
+# JunWRT Commercial Firmware Licensing Engine
+# Verifies offline cryptographic RSA-2048 digital signatures tied to AW1000 hardware
+# ==============================================================================
+
+PUB_KEY="/etc/junwrt_pub.pem"
+LIC_FILE="/etc/junwrt.lic"
+
+get_machine_id() {
+	if [ -s /etc/junwrt_machine_id ]; then
+		local cached=$(head -n 1 /etc/junwrt_machine_id 2>/dev/null | tr -d ' \r\n')
+		case "$cached" in
+			AW1K-????-????-????-????)
+				echo "$cached"
+				return 0
+				;;
+		esac
+	fi
+
+	local cid=""
+	if [ -f /sys/block/mmcblk0/device/cid ]; then
+		cid=$(cat /sys/block/mmcblk0/device/cid 2>/dev/null | tr -d ' \r\n')
+	elif [ -f /sys/block/mmcblk0boot0/device/cid ]; then
+		cid=$(cat /sys/block/mmcblk0boot0/device/cid 2>/dev/null | tr -d ' \r\n')
+	fi
+
+	local mac=""
+	for iface in ra0 eth0 br-lan eth1 mipc0; do
+		if [ -f "/sys/class/net/$iface/address" ]; then
+			mac=$(cat "/sys/class/net/$iface/address" 2>/dev/null | tr -d ' :\r\n' | tr 'a-z' 'A-Z')
+			[ -n "$mac" ] && [ "$mac" != "000000000000" ] && break
+		fi
+	done
+
+	if [ -z "$mac" ] || [ "$mac" = "000000000000" ]; then
+		mac=$(ip link show 2>/dev/null | awk '/ether/{print $2; exit}' | tr -d ' :\r\n' | tr 'a-z' 'A-Z')
+	fi
+
+	local raw_id="JunWRT-AW1000:${cid}:${mac}"
+	local hash=""
+	if command -v sha256sum >/dev/null 2>&1; then
+		hash=$(echo -n "$raw_id" | sha256sum 2>/dev/null | awk '{print $1}' | tr 'a-z' 'A-Z')
+	elif command -v openssl >/dev/null 2>&1; then
+		hash=$(echo -n "$raw_id" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}' | tr 'a-z' 'A-Z')
+	elif command -v md5sum >/dev/null 2>&1; then
+		hash=$(echo -n "$raw_id" | md5sum 2>/dev/null | awk '{print $1}' | tr 'a-z' 'A-Z')
+	fi
+
+	if [ -z "$hash" ]; then
+		hash="8A2FB94C3E7D5F10"
+	fi
+
+	local c1=$(echo "$hash" | cut -c1-4)
+	local c2=$(echo "$hash" | cut -c5-8)
+	local c3=$(echo "$hash" | cut -c9-12)
+	local c4=$(echo "$hash" | cut -c13-16)
+
+	local mid="AW1K-${c1}-${c2}-${c3}-${c4}"
+	echo "$mid" > /etc/junwrt_machine_id 2>/dev/null || true
+	chmod 0644 /etc/junwrt_machine_id 2>/dev/null || true
+	echo "$mid" > /tmp/junwrt_machine_id 2>/dev/null || true
+	echo "$mid"
+}
+
+verify_token_str() {
+	local token="$1"
+	local current_mid="$2"
+
+	# Strip PEM headers if present
+	token=$(echo "$token" | sed -e 's/-----BEGIN JUNWRT LICENSE-----//g' -e 's/-----END JUNWRT LICENSE-----//g' | tr -d ' \r\n\t')
+
+	local p_b64=$(echo "$token" | cut -d'.' -f1)
+	local s_b64=$(echo "$token" | cut -d'.' -f2)
+
+	if [ -z "$p_b64" ] || [ -z "$s_b64" ]; then
+		return 1
+	fi
+
+	if [ ! -f "$PUB_KEY" ]; then
+		return 2
+	fi
+
+	local tmp_dir="/tmp/junwrt_lic_$$"
+	mkdir -p "$tmp_dir"
+
+	# Decode payload and signature
+	if command -v base64 >/dev/null 2>&1; then
+		echo "$p_b64" | base64 -d > "$tmp_dir/payload.json" 2>/dev/null
+		echo "$s_b64" | base64 -d > "$tmp_dir/sig.bin" 2>/dev/null
+	fi
+	if [ ! -s "$tmp_dir/payload.json" ]; then
+		echo "$p_b64" | openssl base64 -d -A > "$tmp_dir/payload.json" 2>/dev/null
+		echo "$s_b64" | openssl base64 -d -A > "$tmp_dir/sig.bin" 2>/dev/null
+	fi
+
+	# Verify cryptographic signature with OpenSSL
+	openssl dgst -sha256 -verify "$PUB_KEY" -signature "$tmp_dir/sig.bin" "$tmp_dir/payload.json" >/dev/null 2>&1
+	local res=$?
+
+	if [ $res -ne 0 ]; then
+		rm -rf "$tmp_dir"
+		return 3
+	fi
+
+	# Check Machine ID match
+	local lic_mid=$(sed -n 's/.*"machine_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp_dir/payload.json" 2>/dev/null)
+	if [ -z "$lic_mid" ]; then
+		lic_mid=$(grep -o '"machine_id":"[^"]*"' "$tmp_dir/payload.json" 2>/dev/null | cut -d'"' -f4)
+	fi
+	if [ "$lic_mid" != "$current_mid" ]; then
+		rm -rf "$tmp_dir"
+		return 4
+	fi
+
+	# Check expiration if present
+	local exp=$(sed -n 's/.*"expires_at"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$tmp_dir/payload.json" 2>/dev/null)
+	if [ -z "$exp" ]; then
+		exp=$(grep -o '"expires_at":[0-9]*' "$tmp_dir/payload.json" 2>/dev/null | cut -d':' -f2)
+	fi
+	if [ -n "$exp" ] && [ "$exp" -gt 0 ]; then
+		local now=$(date +%s)
+		if [ "$now" -gt "$exp" ]; then
+			rm -rf "$tmp_dir"
+			return 5
+		fi
+	fi
+
+	rm -rf "$tmp_dir"
+	return 0
+}
+
+# Reserved chains: remove only license-owned jumps/chains, never matching owner rules.
+license_chain() {
+	"$1" -w 5 -t "$2" -N "$3" 2>/dev/null || "$1" -w 5 -t "$2" -S "$3" >/dev/null 2>&1
+}
+license_rule() {
+	local tool="$1" table="$2" chain="$3"
+	shift 3
+	"$tool" -w 5 -t "$table" -C "$chain" "$@" 2>/dev/null || \
+		"$tool" -w 5 -t "$table" -A "$chain" "$@" 2>/dev/null
+}
+license_jump() {
+	"$1" -w 5 -t "$2" -C "$3" -j "$4" 2>/dev/null || \
+		"$1" -w 5 -t "$2" -I "$3" 1 -j "$4" 2>/dev/null
+}
+license_release_chain() {
+	local tool="$1" table="$2" parent="$3" chain="$4"
+	"$tool" -w 5 -t "$table" -S "$parent" >/dev/null 2>&1 || return 1
+	while "$tool" -w 5 -t "$table" -C "$parent" -j "$chain" 2>/dev/null; do
+		"$tool" -w 5 -t "$table" -D "$parent" -j "$chain" 2>/dev/null || return 1
+	done
+	if "$tool" -w 5 -t "$table" -S "$chain" >/dev/null 2>&1; then
+		"$tool" -w 5 -t "$table" -F "$chain" 2>/dev/null || return 1
+		"$tool" -w 5 -t "$table" -X "$chain" 2>/dev/null || return 1
+	fi
+}
+license_rule_lock() {
+	local result
+	mkdir -p /var/run || return 1
+	command -v flock >/dev/null 2>&1 || return 1
+	exec 7>/var/run/junwrt-license.rules.lock || return 1
+	flock -n 7 || { exec 7>&-; return 1; }
+	"$@"
+	result=$?
+	flock -u 7 || result=1
+	exec 7>&-
+	return "$result"
+}
+license_lock_body() {
+	local tool reject wan_dev failed=0
+	for tool in iptables ip6tables; do
+		[ "$tool" != ip6tables ] || command -v "$tool" >/dev/null 2>&1 || continue
+		case "$tool" in iptables) reject=icmp-port-unreachable ;; *) reject=icmp6-port-unreachable ;; esac
+		license_chain "$tool" filter JUN_LIC_F || { failed=1; continue; }
+		license_chain "$tool" filter JUN_LIC_I || { failed=1; continue; }
+		license_rule "$tool" filter JUN_LIC_F -i br-lan -j REJECT --reject-with "$reject" || failed=1
+		for wan_dev in ccmni0 ccmni1 ccmni2 wwan0 eth1 eth0 rndis0; do
+			license_rule "$tool" filter JUN_LIC_F -o "$wan_dev" -j REJECT --reject-with "$reject" || failed=1
+		done
+		license_rule "$tool" filter JUN_LIC_I -i br-lan -p udp --dport 53 -j REJECT --reject-with "$reject" || failed=1
+		license_rule "$tool" filter JUN_LIC_I -i br-lan -p tcp --dport 53 -j REJECT --reject-with tcp-reset || failed=1
+		license_jump "$tool" filter FORWARD JUN_LIC_F || failed=1
+		license_jump "$tool" filter INPUT JUN_LIC_I || failed=1
+	done
+	license_chain iptables nat JUN_LIC_N || failed=1
+	license_rule iptables nat JUN_LIC_N -i br-lan -p tcp --dport 80 -j DNAT --to-destination 192.168.1.1:80 || failed=1
+	license_jump iptables nat PREROUTING JUN_LIC_N || failed=1
+	[ "$failed" = 0 ]
+}
+license_unlock_body() {
+	local tool failed=0
+	for tool in iptables ip6tables; do
+		[ "$tool" != ip6tables ] || command -v "$tool" >/dev/null 2>&1 || continue
+		license_release_chain "$tool" filter FORWARD JUN_LIC_F || failed=1
+		license_release_chain "$tool" filter INPUT JUN_LIC_I || failed=1
+	done
+	license_release_chain iptables nat PREROUTING JUN_LIC_N || failed=1
+	[ "$failed" = 0 ]
+}
+lock_rules() {
+	if license_rule_lock license_lock_body; then
+		logger -t junwrt-license "FIRMWARE LOCKED: Valid license key required." || true
+	else
+		logger -t junwrt-license "ERROR: License firewall rules could not be installed; watchdog will retry."
+		return 1
+	fi
+}
+unlock_rules() {
+	if license_rule_lock license_unlock_body; then
+		logger -t junwrt-license "FIRMWARE ACTIVATED: License restrictions cleared." || true
+	else
+		logger -t junwrt-license "ERROR: License firewall rules could not be cleared; watchdog will retry."
+		return 1
+	fi
+}
+
+enforce_firewall() {
+	if [ ! -f "$LIC_FILE" ]; then
+		lock_rules
+		return 1
+	fi
+	local mid=$(get_machine_id)
+	local token=$(cat "$LIC_FILE")
+	if verify_token_str "$token" "$mid"; then
+		unlock_rules
+		return $?
+	else
+		lock_rules
+		return 1
+	fi
+}
+
+watchdog_loop() {
+	while true; do
+		enforce_firewall >/dev/null 2>&1
+		sleep 15
+	done
+}
+
+case "$1" in
+	machine-id|mid)
+		get_machine_id
+		;;
+
+	check)
+		if [ ! -f "$LIC_FILE" ]; then
+			exit 1
+		fi
+		mid=$(get_machine_id)
+		token=$(cat "$LIC_FILE")
+		verify_token_str "$token" "$mid"
+		exit $?
+		;;
+
+	lock-rules)
+		lock_rules
+		;;
+
+	unlock-rules)
+		unlock_rules
+		;;
+
+	enforce-firewall)
+		enforce_firewall
+		exit $?
+		;;
+
+	watchdog)
+		watchdog_loop
+		;;
+
+	info)
+		mid=$(get_machine_id)
+		if [ -f "$LIC_FILE" ]; then
+			token=$(cat "$LIC_FILE")
+			verify_token_str "$token" "$mid"
+			code=$?
+			if [ $code -eq 0 ]; then
+				clean_tok=$(echo "$token" | sed -e 's/-----BEGIN JUNWRT LICENSE-----//g' -e 's/-----END JUNWRT LICENSE-----//g' | tr -d ' \r\n\t')
+				p_b64=$(echo "$clean_tok" | cut -d'.' -f1)
+				payload=""
+				if command -v base64 >/dev/null 2>&1; then
+					payload=$(echo "$p_b64" | base64 -d 2>/dev/null)
+				fi
+				[ -z "$payload" ] && payload=$(echo "$p_b64" | openssl base64 -d -A 2>/dev/null)
+				echo "{\"status\":\"activated\",\"code\":0,\"machine_id\":\"$mid\",\"payload\":$payload}"
+				exit 0
+			else
+				echo "{\"status\":\"invalid\",\"code\":$code,\"machine_id\":\"$mid\"}"
+				exit 0
+			fi
+		else
+			echo "{\"status\":\"unactivated\",\"code\":1,\"machine_id\":\"$mid\"}"
+			exit 0
+		fi
+		;;
+
+	activate)
+		token="$2"
+		if [ -z "$token" ]; then
+			echo "{\"success\":false,\"message\":\"No license key provided.\"}"
+			exit 1
+		fi
+
+		mid=$(get_machine_id)
+		verify_token_str "$token" "$mid"
+		status=$?
+
+		case "$status" in
+			0)
+				clean_tok=$(echo "$token" | sed -e 's/-----BEGIN JUNWRT LICENSE-----//g' -e 's/-----END JUNWRT LICENSE-----//g' | tr -d ' \r\n\t')
+				lic_tmp=$(mktemp "$LIC_FILE.XXXXXX") || { echo '{"success":false,"message":"Could not stage the license key."}'; exit 1; }
+				trap '[ -z "$lic_tmp" ] || rm -f "$lic_tmp"' EXIT
+				if ! printf '%s\n' "$clean_tok" > "$lic_tmp" || ! chmod 0644 "$lic_tmp" || ! mv -f "$lic_tmp" "$LIC_FILE"; then
+					echo '{"success":false,"message":"Could not save the license key. The previous key is preserved."}'
+					exit 1
+				fi
+				lic_tmp=""
+				if ! unlock_rules; then
+					echo '{"success":false,"message":"License saved, but the firewall update failed. Retry activation."}'
+					exit 1
+				fi
+				/etc/init.d/junwrt-license reload >/dev/null 2>&1 || true
+				if ! /etc/init.d/firewall reload >/dev/null 2>&1; then
+					echo '{"success":false,"message":"License saved, but the firewall reload failed. Retry activation."}'
+					exit 1
+				fi
+				echo '{"success":true,"message":"Firmware activated successfully. License restrictions removed."}'
+				exit 0
+				;;
+			1)
+				echo "{\"success\":false,\"message\":\"Malformed license key format.\"}"
+				exit 1
+				;;
+			2)
+				echo "{\"success\":false,\"message\":\"Firmware public key missing (/etc/junwrt_pub.pem).\"}"
+				exit 1
+				;;
+			3)
+				echo "{\"success\":false,\"message\":\"Invalid cryptographic signature. Key was forged or corrupted.\"}"
+				exit 1
+				;;
+			4)
+				echo "{\"success\":false,\"message\":\"Machine ID mismatch. This key was generated for a different router.\"}"
+				exit 1
+				;;
+			5)
+				echo "{\"success\":false,\"message\":\"License key has expired.\"}"
+				exit 1
+				;;
+			*)
+				echo "{\"success\":false,\"message\":\"Activation failed with error code $status.\"}"
+				exit 1
+				;;
+		esac
+		;;
+
+	*)
+		echo "Usage: $0 {machine-id|check|info|activate <key>}"
+		exit 1
+		;;
+esac

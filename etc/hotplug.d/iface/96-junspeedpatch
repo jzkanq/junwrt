@@ -1,0 +1,12 @@
+#!/bin/sh
+# A cellular reconnect can create fresh queues after the boot-time steering pass.
+case "$ACTION" in ifup|ifupdate) ;; *) exit 0 ;; esac
+[ -x /etc/init.d/junspeedpatch ] || exit 0
+[ -e /etc/rc.d/S99junspeedpatch ] || exit 0
+device="${DEVICE:-}"
+if [ -z "$device" ]; then
+    device="$(ifstatus "$INTERFACE" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null | head -n 1)"
+fi
+case "$device" in ''|lo|*[!A-Za-z0-9_.-]*) exit 0 ;; esac
+# Queue updates only: no firewall reload, modem command, radio restart, or UCI write.
+/etc/init.d/junspeedpatch steer "$device" </dev/null >/dev/null 2>&1

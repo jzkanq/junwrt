@@ -1,0 +1,30 @@
+#!/bin/sh /etc/rc.common
+# ==============================================================================
+# JunWRT Commercial Firmware Licensing Service
+# Enforces routing lock until valid cryptographic license key is applied
+# ==============================================================================
+
+START=98
+USE_PROCD=1
+
+start_service() {
+	[ -s /etc/junwrt_machine_id ] || /usr/bin/junwrt-license machine-id > /etc/junwrt_machine_id 2>/dev/null || true
+	chmod 0644 /etc/junwrt_machine_id 2>/dev/null || true
+
+	# Immediate enforcement
+	/usr/bin/junwrt-license enforce-firewall >/dev/null 2>&1 || true
+
+	# Start supervised background watchdog
+	procd_open_instance
+	procd_set_param command /usr/bin/junwrt-license watchdog
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+reload_service() {
+	/usr/bin/junwrt-license enforce-firewall >/dev/null 2>&1 || true
+}
+
+stop_service() {
+	/usr/bin/junwrt-license unlock-rules >/dev/null 2>&1 || true
+}

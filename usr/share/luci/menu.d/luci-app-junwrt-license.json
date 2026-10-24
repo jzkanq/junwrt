@@ -1,0 +1,10 @@
+{
+	"admin/system/activation": {
+		"title": "Activation & License",
+		"order": 15,
+		"action": {
+			"type": "view",
+			"path": "system/activation"
+		}
+	}
+}

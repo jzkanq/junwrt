@@ -1,0 +1,28 @@
+{
+	"luci-app-junwrt-license": {
+		"description": "Grant access to JunWRT License Activation",
+		"read": {
+			"cgi-io": [ "exec" ],
+			"file": {
+				"/etc/junwrt.lic": [ "read" ],
+				"/etc/junwrt_machine_id": [ "read" ],
+				"/tmp/junwrt_machine_id": [ "read" ],
+				"/etc/junwrt_pub.pem": [ "read" ],
+				"/usr/bin/junwrt-license info": [ "exec" ],
+				"/usr/bin/junwrt-license machine-id": [ "exec" ],
+				"/usr/bin/junwrt-license check": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec", "read" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/bin/junwrt-license activate *": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		}
+	}
+}

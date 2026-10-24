@@ -29,14 +29,28 @@ build_value() {
 
 # verify: sets V_TOTAL V_OK V_CHANGED V_MISSING and V_PROBLEMS (JSON strings) from the manifest.
 verify() {
-	local sum path got listed=0
-	V_TOTAL=0; V_OK=0; V_CHANGED=0; V_MISSING=0; V_PROBLEMS=""
-	[ -f "$MANIFEST" ] || return 1
-	while read -r sum path; do
-		case "$path" in
-			/*) ;;
-			*) continue ;;
+	local sum path got listed=0 seen="" expected
+	V_TOTAL=0; V_OK=0; V_CHANGED=0; V_MISSING=0; V_PROBLEMS=""; V_ERROR=""
+	[ -r "$MANIFEST" ] || { V_ERROR="The file manifest is missing or unreadable."; return 1; }
+	while read -r sum path || [ -n "$sum$path" ]; do
+		[ -n "$sum$path" ] || continue
+		case "$sum" in
+			*[!a-fA-F0-9]*) V_ERROR="The file manifest contains an invalid checksum."; continue ;;
 		esac
+		[ "${#sum}" -eq 64 ] || { V_ERROR="The file manifest contains an invalid checksum."; continue; }
+		case "$path" in
+			*'/../'*|*'/./'*|*'//'*) V_ERROR="The file manifest contains an invalid path."; continue ;;
+			/*) ;;
+			*) V_ERROR="The file manifest contains an invalid path."; continue ;;
+		esac
+		case "$seen" in
+			*"
+$path
+"*) V_ERROR="The file manifest contains duplicate paths."; continue ;;
+		esac
+		seen="$seen
+$path
+"
 		V_TOTAL=$((V_TOTAL + 1))
 		if [ ! -f "$ROOT$path" ]; then
 			V_MISSING=$((V_MISSING + 1))
@@ -55,7 +69,35 @@ verify() {
 			listed=$((listed + 1))
 		fi
 	done < "$MANIFEST"
+	[ "$V_TOTAL" -gt 0 ] || V_ERROR="The file manifest has no valid entries."
+	if [ -f "$BUILD_FILE" ]; then
+		expected="$(num "$(build_value files)")"
+		if [ "$expected" -eq 0 ]; then
+			V_ERROR="The build record has no valid file count."
+		elif [ "$V_TOTAL" -ne "$expected" ]; then
+			V_ERROR="The file manifest count differs from the build record."
+		fi
+	fi
+	[ -z "$V_ERROR" ] || return 1
 	return 0
+}
+
+service_state() {
+	local name="$1" reply kind states state
+	# This vendor rc.common defaults service_running() to success, even without a daemon.
+	# Query the same procd instances as lib/functions/procd.sh, without trusting that exit code.
+	reply="$(ubus call service list "{\"name\":\"$name\"}" 2>/dev/null)" || { printf null; return; }
+	kind="$(jsonfilter -s "$reply" -t '@' 2>/dev/null)"
+	[ "$kind" = object ] || { printf null; return; }
+	states="$(jsonfilter -s "$reply" -e "@['$name'].instances.*.running" 2>/dev/null)"
+	for state in $states; do
+		case "$state" in
+			true) printf true; return ;;
+			false) ;;
+			*) printf null; return ;;
+		esac
+	done
+	printf false
 }
 
 services_json() {
@@ -66,7 +108,7 @@ services_json() {
 			*[!A-Za-z0-9_-]*) continue ;;
 		esac
 		printf '%s"%s":%s' "$([ "$first" = 1 ] || printf ',')" "$name" \
-			"$("$ROOT/etc/init.d/$name" running >/dev/null 2>&1 && echo true || echo false)"
+			"$(service_state "$name")"
 		first=0
 	done
 	printf '}'
@@ -83,7 +125,7 @@ status() {
 	printf '{"installed":%s,"build":{"time":"%s","epoch":%s,"payload":"%s","files":%s,"modules":"%s"},' \
 		"$installed" "$(clean "$(build_value built)" 40)" "$(num "$(build_value epoch)")" "$(clean "$(build_value payload)" 16)" \
 		"$(num "$(build_value files)")" "$(clean "$(build_value modules)" 160)"
-	printf '"verify":{"total":%s,"ok":%s,"changed":%s,"missing":%s,"problems":[%s]},' "$V_TOTAL" "$V_OK" "$V_CHANGED" "$V_MISSING" "$V_PROBLEMS"
+	printf '"verify":{"total":%s,"ok":%s,"changed":%s,"missing":%s,"error":"%s","problems":[%s]},' "$V_TOTAL" "$V_OK" "$V_CHANGED" "$V_MISSING" "$(clean "$V_ERROR")" "$V_PROBLEMS"
 	printf '"system":{"uptime":%s,"load":"%s","mem_available_kb":%s,"overlay_free_kb":%s},"services":%s,"now":%s}\n' \
 		"$uptime" "$(clean "$load" 12)" "$(num "$kb")" "$(num "$overlay")" "$(services_json)" "$(date +%s)"
 }
@@ -120,26 +162,36 @@ collect() { # directory
 		echo "== file check"
 		verify
 		echo "total=$V_TOTAL ok=$V_OK changed=$V_CHANGED missing=$V_MISSING"
+		[ -z "$V_ERROR" ] || echo "verification_error=$V_ERROR"
 		echo "== services"; services_json; echo
 		echo "== speed test towers"; "$ROOT/usr/bin/junwrt-speedtest" towers 2>/dev/null
 		echo "== data usage"; "$ROOT/usr/bin/junwrt-usage" status 2>/dev/null
 		echo "== connection guard"; "$ROOT/usr/bin/junwrt-guard" status 2>/dev/null
 		echo "== security"; "$ROOT/usr/bin/junwrt-security" status 2>/dev/null
 	} 2>&1 | redact > "$dir/junwrt.txt"
+	# Capture while the slow transfer is running: distinguish inactive NR from CPU/forwarding limits.
+	if [ -x "$ROOT/etc/init.d/junspeedpatch" ]; then
+		"$ROOT/etc/init.d/junspeedpatch" status 2>&1 | redact > "$dir/performance.txt"
+	fi
 }
 
 bundle() {
-	local dir="${TMPDIR:-/tmp}/junwrt-support.$$"
-	mkdir -p "$dir" || die "Could not create a temporary folder."
+	local dir="${TMPDIR:-/tmp}/junwrt-support.$$" result
+	# Never reuse an existing folder; cleanup owns only the directory we created.
+	mkdir "$dir" || die "Could not create a temporary folder."
+	trap 'rm -rf "$dir"' EXIT
 	collect "$dir"
 	tar -czf - -C "$dir" . 2>/dev/null
+	result=$?
 	rm -rf "$dir"
+	trap - EXIT
+	return "$result"
 }
 
 case "${1:-}" in
 	status) status ;;
 	bundle) bundle ;;
-	verify) verify; printf '{"total":%s,"ok":%s,"changed":%s,"missing":%s}\n' "$V_TOTAL" "$V_OK" "$V_CHANGED" "$V_MISSING"
-		[ "$V_CHANGED" = 0 ] && [ "$V_MISSING" = 0 ] ;;
+	verify) verify; printf '{"total":%s,"ok":%s,"changed":%s,"missing":%s,"error":"%s"}\n' "$V_TOTAL" "$V_OK" "$V_CHANGED" "$V_MISSING" "$(clean "$V_ERROR")"
+		[ -z "$V_ERROR" ] && [ "$V_TOTAL" -gt 0 ] && [ "$V_CHANGED" = 0 ] && [ "$V_MISSING" = 0 ] ;;
 	*) echo "Usage: $0 {status|verify|bundle}"; exit 2 ;;
 esac

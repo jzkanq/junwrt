@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+# Preserve the vendor RF-switch and USB helpers; no updater or timed reboot.
+START=99
+USE_PROCD=1
+SCRIPT="/sbin/arc-antenna-switch.sh"
+SCRIPT2="/sbin/arc-check-usb-mode.sh"
+
+is_supported_board() {
+    local board
+    board="$(cat /tmp/sysinfo/device_name 2>/dev/null)"
+    case "$board" in telstra,meteor2) return 0 ;; esac
+    return 1
+}
+
+start_service() {
+    is_supported_board || return 0
+    if [ -x "$SCRIPT" ]; then
+        procd_open_instance antenna
+        procd_set_param command "$SCRIPT"
+        procd_set_param respawn 3600 5 5
+        procd_close_instance
+    fi
+    if [ -x "$SCRIPT2" ]; then
+        procd_open_instance usb
+        procd_set_param command "$SCRIPT2"
+        procd_close_instance
+    fi
+}

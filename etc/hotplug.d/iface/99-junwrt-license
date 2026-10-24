@@ -1,0 +1,2 @@
+#!/bin/sh
+[ "$ACTION" = "ifup" ] && /usr/bin/junwrt-license enforce-firewall >/dev/null 2>&1 || true

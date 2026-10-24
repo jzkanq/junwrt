@@ -1,116 +1,85 @@
-# JunWRT — AW1000 Modern Cellular WebUI & Hot-Deployer
+# JunWRT: High-Performance 5G Firmware & Toolkit for AW1000 / AW1000 Ultra (MediaTek MT6890 / T750)
 
-[![Platform](https://img.shields.io/badge/Platform-OpenWrt%20%7C%20AW1000-blue.svg)](https://openwrt.org)
-[![Shell](https://img.shields.io/badge/Language-POSIX%20Shell-green.svg)](https://www.gnu.org/software/bash/)
-[![License](https://img.shields.io/badge/License-Commercial%20Proprietary-red.svg)](#activation--licensing)
+The 2026-10-15 firmware rebuild includes the current feature modules, Speed Test, Parental Control and Wi-Fi persistence repair. It restores the sanitized antenna-switch service that the older performance script disabled, reapplies packet steering after cellular reconnects and uses canonical WebUI sources instead of older flat deployment copies. The tester's NSA B28+n78 drop from about 300 Mbps to 50–70 Mbps is under investigation; restored throughput still needs a same-device test under load. See [the investigation and acceptance steps](CELLULAR_SPEED_INVESTIGATION.md).
 
-Modern, high-contrast WebUI theme (white Light Mode, graphite Dark Mode) and real-time Cellular Cockpit for AW1000 5G OpenWrt routers.
+The latest offline stability package is `output/JunWRT_AW1000_Firmware_20261015_stability3`. It preserves custom firewall rules during WebUI installation, prevents duplicate named Tailscale rules and concurrent installers, synchronizes legacy repair scripts, and checks vendor hashes and partition limits before atomic publication. Support rejects incomplete manifests, reads actual procd service state and propagates diagnostics archive failures. Licensing now removes only its owned rules, saves verified keys atomically and reports activation failures accurately; the page has exact command permissions and no unchecked-write fallback. Legacy WebUI migration restarts the firewall to rebuild persistent policy, so temporary rules should be persisted first. Both static gates bind results to the exact image/installer bytes. Read that package's `VALIDATION.md` for checks and tester acceptance; boot and cellular speed remain unverified because only files and tester feedback are available.
+
+The WebUI installer includes **Modem → Speed Test**, a router-side cellular speed test that saves each result with the serving cell and ranks cells by speed (`junwrt-speedtest run` / `towers` over SSH). It runs only when started and uses up to about 260 MB of mobile data per test. While a transfer runs, the dial shows the link's real throughput, read from the cellular interface counters twice a second.
+
+The WebUI installer also adds five opt-in **Modem** pages built from one module list (`junwrt_modules.py`):
+
+- **Connection Guard** re-dials the cellular interface, then restarts the modem radio and optionally reboots when the connection stays down. Off by default.
+- **Data Usage** counts the cellular bytes per day and warns before your monthly limit.
+- **Notifications** sends Telegram, ntfy or webhook alerts for connection loss, cell changes, data limit, Guard actions, slow speed tests and received SMS.
+- **Security** reports the factory password, WAN-exposed SSH, UPnP and open Wi-Fi, with two safe one-click fixes.
+- **Support** shows the installed build, verifies the installed files against the installer's manifest and creates a redacted diagnostics bundle.
+
+Run `tools\run_checks.ps1` to execute every test and both verification gates. The modules have not yet been run on a router; see AGENTS.md section 14 for what still needs a live check.
+
+The WebUI installer also includes **Modem → Parental Control** for per-device MAC profiles, Child/Teen DNS filters and allowed internet schedules. It is opt-in, supports Light/Dark modes and preserves existing profiles. See [setup and AW1000 runtime acceptance requirements](PARENTAL_CONTROL.md); hardware NAT enforcement still needs router testing.
+
+JunWRT is a customized, optimized, and zero-DRM OpenWrt build specifically engineered for the **AW1000 / AW1000 Ultra / V2 (MediaTek MT6890 / T750 ARM64)** 5G CPE router.
 
 ---
 
-## ⚡ 1-Line Quick Installation (No WinSCP Required)
+## 🌟 Key Fixes & Enhancements in JunWRT
 
-Connect to your router via SSH (PuTTY, Terminal, or Command Prompt) and run this single command:
+### 1. 🛡️ Complete DRM & Random Reboot Elimination
+- **De-fanged `mount_root`**: Binary-patched `/sbin/mount_root` with AArch64 `NOP` sled to completely eliminate the `/proc/ccci_*` verification trap that caused endless preinit bootloops.
+- **Removed Authcode Web/Lua Layer**: Stripped `/usr/lib/lua/luci/controller/admin/authcode.lua`, `/usr/lib/lua/luci/view/authcode/`, and removed `luci-app-authcode` from opkg.
+- **Removed Time-Bomb & Downloader**: Removed the reboot and remote-download logic from `/etc/init.d/arc_antenna_switch` while preserving its board-specific antenna GPIO and USB helpers under procd supervision.
+- **Disabled `modem_watchdog` Reboots**: Replaced `/sbin/modem_watchdog` with a safe monitor that prevents forced reboots during heavy traffic or AT command latency.
 
-```sh
-wget -qO /tmp/install.sh https://raw.githubusercontent.com/jzkanq/junwrt/main/install_webui_only.sh && sh /tmp/install.sh
+### 2. ⚡ High-Speed Cellular Stack & Upload Speed Fix
+- **Eliminated 8 Mbps Upload Bottleneck**: `/etc/firewall.user` clamps TCP MSS on the FORWARD chain and adds the rule only when it is missing:
+  ```sh
+  iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+  iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+  ```
+- **Extended Kernel Buffers**: Injected `/etc/sysctl.d/99-junwrt-performance.conf` with 4 MB socket buffers (`rmem_max`/`wmem_max = 4194304`, `tcp_rmem = 4096 87380 4194304`, `tcp_wmem = 4096 65536 4194304`), `netdev_max_backlog = 10000`, `tcp_fastopen = 3` and `nf_conntrack_max = 65536`. TCP MTU probing stays off to protect cellular MSS.
+- **Queueing & Congestion Control**: `fq_codel` is the default qdisc. Congestion control stays at the kernel default (cubic); BBR is not available in this 4.19 kernel, so it is not configured.
+
+### 3. 🔥 Hardware NAT (MediaTek WARP) & Thermal Fix
+- **Cellular Hotspot TTL**: The TTL page controls IPv4 TTL on client traffic forwarded from `br-lan` to the active cellular WAN; IPv6 Hop Limit is fixed at 64 for the carrier hotspot workaround. LAN Router Advertisements retain the required outer Hop Limit of 255. The service removes duplicate legacy rules and leaves hardware acceleration enabled.
+- **Hardware NAT**: MediaTek `mtk_warp` hardware NAT remains available, preventing 90%+ CPU spikes and thermal throttling under gigabit traffic. OpenWrt's generic software and hardware flow offloading stay disabled (`flow_offloading=0`, `flow_offloading_hw=0`) because they stall WireGuard, OpenVPN, PassWall and OpenClash.
+
+### 4. 📶 Native Modem Management CLI (`junwrt-modem`)
+Pre-installed at `/usr/bin/junwrt-modem` for native modem control:
+- `junwrt-modem info`: Real-time cellular registration, signal metrics (CESQ / RSRP / RSRQ / SINR), active carrier aggregation, 5G option mode, and IMEI.
+- `junwrt-modem imei <15-digit IMEI>`: Read or write modem IMEI via `AT+EGMR=1,7,"..."`.
+- `junwrt-modem lockband "<band_spec>"`: Lock LTE / 5G bands (e.g. `junwrt-modem lockband '4,1/3/7/28;5,78'`).
+- `junwrt-modem unlockband`: Clear all band locks and restore full automatic band selection.
+- `junwrt-modem 5gmode <sa|nsa|both|off>`: Switch 5G NR operation mode via `AT+E5GOPT`.
+- `junwrt-modem at "<AT_COMMAND>"`: Direct AT command console.
+- `junwrt-modem reset-nvdata`: Wipe `/mnt/vendor/nvdata/*` to clear corrupted carrier lock data.
+
+### 5. 💾 Automated eMMC Extroot Storage Expansion
+- Pre-installed at `/sbin/setup_extroot_p50.sh`.
+- Automatically formats `/dev/mmcblk0p50` as ext4 (if unformatted), migrates current overlay data, and mounts it permanently as `/overlay`.
+
+---
+
+## 📦 Directory Structure
+
 ```
-
-> **Note:** Internet access on the router is required for this command. The installer does not reboot the router, but it reloads networking and restarts Tailscale and LuCI services, which can briefly interrupt access.
-
----
-
-## 📖 Newbie Step-by-Step Tutorial
-
-### Step 1: Open SSH Terminal
-1. Open **PuTTY** on Windows (or Terminal on macOS/Linux).
-2. Host Name: 192.168.1.1 (or your router\'s LAN IP).
-3. Port: 22 | Connection type: SSH.
-4. Click **Open**.
-5. Log in as `root` with your router password.
-
-### Step 2: Paste the 1-Line Installer Command
-Copy and right-click in PuTTY to paste:
-```sh
-wget -qO /tmp/install.sh https://raw.githubusercontent.com/jzkanq/junwrt/main/install_webui_only.sh && sh /tmp/install.sh
-```
-Press **Enter**. You will see the slant JunWRT banner and installation progress.
-
-### Step 3: Clear Browser Cache & Access WebUI
-1. Open your browser and navigate to http://192.168.1.1.
-2. Press **Ctrl + Shift + R** (or Cmd + Shift + R on Mac) to perform a hard refresh and purge old LuCI cached files.
-3. Enjoy the JunWRT Cockpit with white Light Mode and graphite-gray Dark Mode styling.
-
----
-
-## 🔑 Activation & Licensing
-
-JunWRT comes with built-in commercial machine-tied licensing:
-
-1. In the WebUI, go to **System** &rarr; **Activation**.
-2. Copy your unique **Machine ID** (e.g. AW1K-XXXX-XXXX-XXXX-XXXX).
-3. Send your Machine ID to your JunWRT vendor/administrator to issue your License Key.
-4. Paste your License Key into the box and click **Activate System**.
-
----
-
-## 🚀 Key Features
-
-* **⚡ Real-Time Cellular Cockpit Dashboard (3gdetail.js)**:
-  - Live signal gauges (RSRP, RSRQ, SINR, RSSI, CQI).
-  - Carrier Aggregation (CA) band tracking (Primary + Secondary Component Carriers).
-  - Cell ID, eNodeB / gNodeB, Bandwidth, and PCI live monitoring.
-* **📶 Speed Test & Tower Analyzer (Modem → Speed Test)**:
-  - Tests the router's own cellular link against the nearest Cloudflare server (download, upload, latency, jitter), so Wi-Fi does not affect the result.
-  - Saves each result with the serving cell (band, PCI, EARFCN, RSRP/SINR) and ranks cells by average speed; the router keeps the last 50 results.
-  - Runs only when started. Each test uses up to about 260 MB of mobile data. SSH: `junwrt-speedtest run`, `junwrt-speedtest towers`.
-* **🧰 Opt-in Modem pages (Connection Guard, Data Usage, Notifications, Security, Support)**:
-  - **Connection Guard**: when the cellular link stays down it re-dials the interface, then restarts the modem radio and, only if you enable it, reboots. Off by default, with a cooldown and a daily limit.
-  - **Data Usage**: counts cellular bytes per day and warns before your monthly limit.
-  - **Notifications**: Telegram, ntfy or webhook alerts for connection loss, cell changes, data limit, Guard actions, slow speed tests and received SMS.
-  - **Security**: flags the factory password, SSH open to the internet side, UPnP and open Wi-Fi, with two safe one-click fixes.
-  - **Support**: shows the installed build, checks the installed files against the installer's manifest and creates a redacted diagnostics bundle.
-  - Settings are kept across re-installs; nothing here changes your Wi-Fi names or passwords.
-* **🎨 Light / Dark Modern Hardware Appliance UI**:
-  - Crisp white Light Mode and neutral graphite-gray Dark Mode across all modem sub-pages (Cell Scan, SIM, Band Lock, IMEI, APN, TTL, AT Debug, SMS).
-  - High-contrast solid buttons and status badges.
-  - Zero eye strain, eliminating dated stock gradients.
-* **🛡️ PassWall 2 Modern UI & 1-Click Link Import**:
-  - Completely restyled with modern card layout, clean typography, and status badges.
-  - 1-Click **"Add Node via Link"** modal supporting `vless://`, `vmess://`, `ss://`, `ssr://`, and `trojan://` sharing URLs.
-* **🌐 Tailscale Mesh VPN Engine**:
-  - **1-Click Auth Key Login**: Paste your `tskey-auth-...` key and connect instantly in 1–2 seconds.
-  - **Sub-Second Web Login**: Fast non-blocking auth URL generation with zero 30s freezes.
-  - **Anti-OOM Protection**: Capped at 48MB RAM (`GOMEMLIMIT=48MiB`, `GOGC=15`), preventing daemon memory ballooning and kernel OOM kills.
-  - **Direct WireGuard P2P**: Native OpenWrt fw3 (`iptables`) mode with WAN UDP port 41641 open, bypassing slow DERP relay servers.
-* **🔒 Configuration scope**:
-  - Does not change Wi-Fi SSIDs, Wi-Fi passwords, or modem AT settings.
-  - Sets the hostname and LuCI theme, configures Tailscale firewall rules, and reloads networking and related services.
-  - Back up the router configuration before installation.
-* **💻 Custom Slant Terminal Banner**:
-  - Includes custom slant ASCII banner and automatically synchronizes the system hostname to JunWRT.
-
----
-
-## 📋 Compatibility
-
-* **Hardware**: AW1000 5G Wi-Fi 6 Router (MediaTek MT7981 / MT7915).
-* **Firmware**: OpenWrt 21.02 / 23.05 based AW1000 builds with standard LuCI and 3ginfo/modem modules.
-
----
-
-## 🛠 Manual Offline Installation (Optional)
-
-If your router does not have internet access, you can download install_webui_only.sh to your PC, upload it via WinSCP to /tmp/, and execute:
-
-```sh
-sh /tmp/install_webui_only.sh
+d:\JunWRT\
+├── build_junwrt.py                    # Automated firmware rebuild pipeline
+├── stock.tar                          # Extracted stock rootfs tarball
+├── junwrt_root.squashfs               # Repacked JunWRT root filesystem
+├── tools\                             # Native SquashFS tools (tar2sqfs, sqfs2tar)
+└── output\JunWRT_AW1000_Firmware\     # Complete Flashing Package
+    ├── root.squashfs                  # Modified JunWRT rootfs (XZ, 256k block size)
+    ├── boot-verified.img              # Signed MediaTek Linux Kernel
+    ├── modem-verified.img             # Signed 5G Baseband Firmware
+    ├── dsp-verified.bin               # Signed DSP Firmware
+    ├── MT6890_openwrt_scatter.xml     # SP Flash Tool scatter partition layout
+    ├── MCF_OTA_1.img / MCF_OTA_2.img  # Modem Calibration & Carrier Profiles
+    ├── SP_Flash_Tool\                 # MediaTek SP Flash Tool v5.2044
+    └── FLASHING_GUIDE.md              # Step-by-step flashing instructions
 ```
 
 ---
 
-## Dark Mode Surface Repair (WebUI Assets Only)
+## 🚀 Flashing Instructions
 
-Dark-mode and PassWall 2 surface fixes are included in the existing `install_webui_only.sh`, so users can keep using the same download command and filename. The script packages the updated Argon theme, modem styles, PassWall 2 stylesheet, and its view references alongside the existing JunWRT WebUI bundle. It runs the installer’s normal JunWRT suite setup and does not flash firmware.
-
-After installation, hard-refresh LuCI with **Ctrl + Shift + R** (or **Cmd + Shift + R** on macOS).
+Refer to `output/JunWRT_AW1000_Firmware/FLASHING_GUIDE.md` for complete SP Flash Tool (BROM mode) and live SSH flashing steps.

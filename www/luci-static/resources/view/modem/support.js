@@ -49,8 +49,10 @@ return view.extend({
         function show(status) {
             var v = status.verify;
             var differs = v.changed + v.missing;
-            pill.className = 'ju-pill ' + (!status.installed ? '' : differs ? 'is-warn' : 'is-ok');
-            pill.textContent = !status.installed ? _('Not installed by the WebUI installer')
+            var verificationError = v.error || (v.total === 0 ? _('No files could be checked.') : '');
+            pill.className = 'ju-pill ' + (!status.installed ? '' : verificationError || differs ? 'is-warn' : 'is-ok');
+            pill.textContent = !status.installed ? _('No build record')
+                : verificationError ? _('File check unavailable')
                 : differs ? _('%s file(s) differ').format(differs) : _('All files match');
             values.built.textContent = status.build.time || '–';
             values.payload.textContent = status.build.payload || '–';
@@ -60,6 +62,7 @@ return view.extend({
             values.memory.textContent = kib(status.system.mem_available_kb);
             values.overlay.textContent = kib(status.system.overlay_free_kb);
             check.textContent = !status.installed ? _('This router has no install record yet. Run the WebUI installer once to create it.')
+                : verificationError ? _('The file check could not be completed: %s').format(verificationError)
                 : differs ? _('%s of %s files do not match the installer manifest. Run the installer again to restore them.').format(differs, v.total)
                 : _('%s of %s files match the installer manifest.').format(v.ok, v.total);
             problems.replaceChildren();
@@ -69,8 +72,10 @@ return view.extend({
             });
             services.replaceChildren();
             Object.keys(status.services).forEach(function(name) {
+                var running = status.services[name];
                 services.appendChild(E('div', { 'class': 'ju-row' }, [E('span', { 'class': 'ju-mono' }, name),
-                    E('span', { 'class': 'ju-pill ' + (status.services[name] ? 'is-ok' : 'is-bad') }, status.services[name] ? _('Running') : _('Stopped'))]));
+                    E('span', { 'class': 'ju-pill ' + (running === true ? 'is-ok' : running === false ? 'is-bad' : 'is-warn') },
+                        running === true ? _('Running') : running === false ? _('Stopped') : _('Unknown'))]));
             });
             if (!Object.keys(status.services).length)
                 services.appendChild(E('p', { 'class': 'ju-empty' }, _('No module services are recorded.')));

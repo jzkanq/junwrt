@@ -9,6 +9,15 @@ HISTORY="$DATA_DIR/history"
 LOCK="$RUN_DIR/lock"
 STATE="$RUN_DIR/state"
 ERROR_FILE="$RUN_DIR/error"
+# Live reading while a transfer runs: the WAN device's byte counter, sampled twice a second.
+LIVE="$RUN_DIR/live"
+UPTIME_FILE="$ROOT/proc/uptime"
+NET_DIR="$ROOT/sys/class/net"
+ROUTE_FILE="$ROOT/proc/net/route"
+WAN_IFACE=wan
+LIVE_SAMPLES=100
+LIVE_STEP=""
+LIVE_PID=""
 # Plain HTTP keeps the router's mbedTLS encryption cost out of the result; only test data is sent.
 BASE_URL="http://speed.cloudflare.com"
 STREAMS=4
@@ -65,12 +74,102 @@ take_lock() {
 	mkdir -p "$RUN_DIR" || { fail "Cannot create the speed test state directory."; return 1; }
 	exec 9>"$LOCK" || { fail "Cannot open the speed test lock."; return 1; }
 	flock -n 9 || { fail "A speed test is already running."; return 1; }
-	rm -f "$ERROR_FILE"
+	rm -f "$ERROR_FILE" "$LIVE" "$LIVE.tmp"
 }
 
+# The state line is "<phase> <start time> <latency> <jitter> <download>" (- while unknown), so one
+# status read sees the phase together with the figures measured so far.
 phase() {
-	echo "$1 $STARTED" > "$STATE"
+	echo "$1 $STARTED ${LATENCY:--} ${JITTER:--} ${DOWN:--}" > "$STATE"
 	echo "$2"
+}
+
+# True for a plain non-negative decimal such as 12 or 412.3, so it is safe to print as JSON.
+is_decimal() {
+	case "$1" in
+		''|*[!0-9.]*|.*|*.|*.*.*) return 1 ;;
+	esac
+	return 0
+}
+
+# Device that carries the cellular traffic: the WAN interface's L3 device, else the default route's.
+wan_device() {
+	local device
+	device="$(ifstatus "$WAN_IFACE" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null | head -n 1)"
+	[ -n "$device" ] || device="$(awk 'NR > 1 && $2 == "00000000" && $8 == "00000000" && (best == "" || $7 + 0 < metric) {
+		best = $1
+		metric = $7 + 0
+	} END { if (best != "") print best }' "$ROUTE_FILE" 2>/dev/null)"
+	case "$device" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+	[ -r "$NET_DIR/$device/statistics/rx_bytes" ] || return 1
+	printf '%s' "$device"
+}
+
+# Sets CS to the uptime in centiseconds, the finest clock BusyBox shell arithmetic can use.
+clock() {
+	local up frac
+	[ -r "$UPTIME_FILE" ] || return 1
+	read -r up _ < "$UPTIME_FILE"
+	case "$up" in ''|*[!0-9.]*|*.*.*) return 1 ;; esac
+	frac="${up#*.}00"
+	frac="${frac%"${frac#??}"}"
+	case "$frac" in 0?) frac="${frac#0}" ;; esac
+	CS=$((${up%%.*} * 100 + frac))
+}
+
+# Sets BYTES to the WAN device's received (rx) or sent (tx) byte counter.
+counter() {
+	read -r BYTES < "$NET_DIR/$LIVE_DEVICE/statistics/$1_bytes" || return 1
+	case "$BYTES" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+# Publishes "<rx|tx> <Mbps> <uptime>" for status; $2 is the speed in tenths of a Mbps.
+live_write() {
+	printf '%s %s.%s %s\n' "$1" "$(($2 / 10))" "$(($2 % 10))" "$CS" > "$LIVE.tmp" && mv -f "$LIVE.tmp" "$LIVE"
+}
+
+# Every step it publishes the rate over the last second of one counter ("rx" or "tx"). It stops
+# on its own after LIVE_SAMPLES steps so a killed test cannot leave it running.
+live_sample() {
+	local direction="$1" n=0 older_bytes prev_bytes older_cs prev_cs ticks
+	counter "$direction" && clock || return 1
+	older_bytes="$BYTES"
+	prev_bytes="$BYTES"
+	older_cs="$CS"
+	prev_cs="$CS"
+	live_write "$direction" 0
+	while [ "$n" -lt "$LIVE_SAMPLES" ]; do
+		sleep "$LIVE_STEP"
+		n=$((n + 1))
+		counter "$direction" && clock || continue
+		ticks=$((CS - older_cs))
+		# A counter that went backwards (device reset) skips the step instead of showing a rate.
+		if [ "$ticks" -gt 0 ] && [ "$BYTES" -ge "$older_bytes" ]; then
+			live_write "$direction" "$(( (BYTES - older_bytes) * 8 / (ticks * 1000) ))"
+		fi
+		older_bytes="$prev_bytes"
+		older_cs="$prev_cs"
+		prev_bytes="$BYTES"
+		prev_cs="$CS"
+	done
+}
+
+live_start() {
+	live_stop
+	[ -n "$LIVE_STEP" ] || { sleep 0.2 2>/dev/null && LIVE_STEP=0.5 || LIVE_STEP=1; }
+	LIVE_DEVICE="$(wan_device)" || return 0
+	# Closing fd 9 keeps a surviving sampler from holding the test lock.
+	live_sample "$1" 9>&- &
+	LIVE_PID=$!
+}
+
+live_stop() {
+	if [ -n "$LIVE_PID" ]; then
+		kill "$LIVE_PID" 2>/dev/null
+		wait "$LIVE_PID" 2>/dev/null
+		LIVE_PID=""
+	fi
+	rm -f "$LIVE" "$LIVE.tmp"
 }
 
 modem_field() {
@@ -153,7 +252,7 @@ upload_blocks() {
 # Prints "<Mbps> <bytes> <server ip>" for parallel streams. Downloads count every byte
 # received; uploads count only server-confirmed requests, so unsent buffered data is excluded.
 measure() {
-	local n=0
+	local n=0 pids=""
 	rm -f "$RUN_DIR"/stream.*
 	while [ "$n" -lt "$STREAMS" ]; do
 		if [ "$1" = down ]; then
@@ -167,9 +266,11 @@ measure() {
 					-w '%{http_code} %{size_upload} %{time_pretransfer} %{time_total} %{remote_ip}\n' \
 					"$BASE_URL/__up" > "$RUN_DIR/stream.$n" 2>/dev/null &
 		fi
+		pids="$pids $!"
 		n=$((n + 1))
 	done
-	wait
+	# Waiting for these PIDs only: a bare "wait" would also wait for the live sampler.
+	wait $pids
 	cat "$RUN_DIR"/stream.* 2>/dev/null | awk '$1 == 200 && $2 > 0 && $4 > $3 {
 		bytes += $2
 		if ($4 - $3 > span) span = $4 - $3
@@ -192,6 +293,7 @@ save_result() {
 }
 
 finish() {
+	live_stop
 	rm -f "$RUN_DIR"/stream.* "$RUN_DIR/latency" "$STATE"
 	[ "$DONE" = 1 ] || [ -s "$ERROR_FILE" ] || echo "The speed test stopped unexpectedly." > "$ERROR_FILE"
 }
@@ -221,13 +323,16 @@ run_test() {
 	JITTER="$2"
 
 	phase download "Measuring download ($STREAMS connections, up to $WINDOW s)..."
+	live_start rx
 	result="$(measure down)" || { abort "The download test failed."; return 1; }
+	live_stop
 	set -- $result
 	DOWN="$1"
 	DOWN_TOTAL="$2"
 	ip="$3"
 
 	phase upload "Measuring upload ($STREAMS connections)..."
+	live_start tx
 	blocks="$(upload_blocks)" || { abort "The upload test failed."; return 1; }
 	result="$(measure up "$blocks")" || { abort "The upload test failed."; return 1; }
 	set -- $result
@@ -245,6 +350,7 @@ run_test() {
 		UP="$1"
 		UP_TOTAL=$((UP_TOTAL + $2))
 	fi
+	live_stop
 	DATA_MB="$(awk -v d="$DOWN_TOTAL" -v u="$UP_TOTAL" 'BEGIN { printf "%.1f", (d + u + 1000000) / 1000000 }')"
 	case "$ip" in
 		*:*) IPVER=6 ;;
@@ -311,18 +417,42 @@ history_json() {
 		}' "$HISTORY"
 }
 
+# JSON members for a running test: the speed of the transfer in progress (only while its reading
+# is fresh and belongs to the current phase) and the figures already measured. The files are plain
+# text, so each value is checked before it is printed. Arguments: phase latency jitter download.
+live_json() {
+	local side="" mbps="" stamp=""
+	[ -r "$LIVE" ] && read -r side mbps stamp < "$LIVE"
+	case "$1:$side" in
+		download:rx|upload:tx) ;;
+		*) mbps="" ;;
+	esac
+	case "$stamp" in ''|*[!0-9]*) mbps="" ;; esac
+	if is_decimal "$mbps" && clock && [ "$((CS - stamp))" -le 300 ]; then
+		printf ',"live_mbps":%s' "$mbps"
+	fi
+	is_decimal "$2" && printf ',"live_latency":%s' "$2"
+	is_decimal "$3" && printf ',"live_jitter":%s' "$3"
+	is_decimal "$4" && printf ',"live_down":%s' "$4"
+	return 0
+}
+
 status() {
-	local running=0 phase="" started=0 error="" results
+	local running=0 phase="" started=0 error="" results live="" latency="" jitter="" down=""
 	if is_running; then
 		running=1
-		[ -f "$STATE" ] && read -r phase started < "$STATE"
+		[ -f "$STATE" ] && read -r phase started latency jitter down < "$STATE"
 	fi
 	case "$started" in ''|*[!0-9]*) started=0 ;; esac
 	phase="$(clean "$phase")"
-	[ "$running" = 1 ] || error="$(clean "$(cat "$ERROR_FILE" 2>/dev/null)")"
+	if [ "$running" = 1 ]; then
+		live="$(live_json "$phase" "$latency" "$jitter" "$down")"
+	else
+		error="$(clean "$(cat "$ERROR_FILE" 2>/dev/null)")"
+	fi
 	results="$(history_json)" || { results=""; error="Could not read the speed test history."; }
-	printf '{"running":%s,"phase":"%s","started":%s,"now":%s,"error":"%s","results":[%s]}\n' \
-		"$running" "$phase" "$started" "$(date +%s)" "$error" "$results"
+	printf '{"running":%s,"phase":"%s","started":%s,"now":%s,"error":"%s"%s,"results":[%s]}\n' \
+		"$running" "$phase" "$started" "$(date +%s)" "$error" "$live" "$results"
 }
 
 towers() {

@@ -48,6 +48,11 @@ function num(value, digits) {
     return value == null || !isFinite(Number(value)) ? '–' : Number(value).toFixed(digits);
 }
 
+// Only a real number counts as a live reading, so a missing or malformed value never moves the needle.
+function reading(value) {
+    return typeof value === 'number' && isFinite(value) && value >= 0 ? value : null;
+}
+
 function band(value) {
     return String(value || '').split(' ')[0];
 }
@@ -254,16 +259,22 @@ return view.extend({
             var phase = status.running ? status.phase : '';
             var measuring = phase === 'download' || phase === 'upload';
             var dir = phase === 'upload' ? 'up' : 'down';
+            // While a test runs the helper reports the speed of the transfer in progress and the figures finished so far.
+            var speed = measuring ? reading(status.live_mbps) : null;
+            var shown = { latency: reading(status.live_latency), down: reading(status.live_down), up: null };
+            if (speed != null) shown[dir] = speed;
             stage.classList.toggle('is-running', active);
             Object.keys(stats).forEach(function(key) {
                 stats[key].tile.classList.toggle('is-active', active && PHASE_METRIC[phase] === key);
-                stats[key].value.textContent = active ? '…' : latest ? num(latest[key], 1) : '–';
+                stats[key].value.textContent = !active ? (latest ? num(latest[key], 1) : '–') :
+                    shown[key] != null ? num(shown[key], 1) : '…';
             });
-            jitter.textContent = active ? '…' : latest ? num(latest.jitter, 1) : '–';
+            jitter.textContent = !active ? (latest ? num(latest.jitter, 1) : '–') :
+                reading(status.live_jitter) != null ? num(status.live_jitter, 1) : '…';
             if (!active)
                 gauge.set({ mode: 'idle' });
-            else if (measuring && typeof status.live_mbps === 'number' && isFinite(status.live_mbps) && status.live_mbps >= 0)
-                gauge.set({ mode: 'value', dir: dir, mbps: status.live_mbps, text: num(status.live_mbps, 1), unit: 'Mbps' });
+            else if (speed != null)
+                gauge.set({ mode: 'value', dir: dir, mbps: speed, text: num(speed, 1), unit: 'Mbps' });
             else if (measuring)
                 gauge.set({ mode: 'sweep', dir: dir, text: '…', unit: 'Mbps' });
             else if (phase === 'saving')
@@ -363,7 +374,7 @@ return view.extend({
             history
         ]));
         root.appendChild(E('details', { 'class': 'st-details' }, [E('summary', {}, _('How the test works and its limits')),
-            E('p', { 'class': 'st-help' }, _('The router downloads from and uploads to the nearest Cloudflare server over 4 connections for up to 10 seconds each way. Latency is the median TCP connection time and jitter is its average change between samples. The test uses plain HTTP so the router’s encryption speed does not limit the result; it sends only test data. Proxy or VPN apps that route the router’s own traffic change the result. Cell details come from the modem when the test starts. The router keeps the last 50 results.'))]));
+            E('p', { 'class': 'st-help' }, _('The router downloads from and uploads to the nearest Cloudflare server over 4 connections for up to 10 seconds each way. Latency is the median TCP connection time and jitter is its average change between samples. The test uses plain HTTP so the router’s encryption speed does not limit the result; it sends only test data. While a transfer runs the dial shows the cellular link’s throughput, read from the interface counters twice a second; the saved result counts only data the server confirmed, so it can differ a little from the last dial reading. Proxy or VPN apps that route the router’s own traffic change the result. Cell details come from the modem when the test starts. The router keeps the last 50 results.'))]));
         update(data);
         if (refreshPoll) poll.remove(refreshPoll);
         refreshPoll = function() {
@@ -372,7 +383,8 @@ return view.extend({
                 showMessage(_('Status unavailable: %s').format(error.message), true);
             });
         };
-        poll.add(refreshPoll, 2);
+        // One second keeps the dial close to the helper's twice-a-second readings; an idle page does no request.
+        poll.add(refreshPoll, 1);
         return root;
     },
     handleSaveApply: null,

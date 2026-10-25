@@ -1,0 +1,15 @@
+{
+  "admin/modem/lights": {
+    "title": "Light Control",
+    "order": 49,
+    "action": {
+      "type": "view",
+      "path": "modem/lights"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-lights"
+      ]
+    }
+  }
+}

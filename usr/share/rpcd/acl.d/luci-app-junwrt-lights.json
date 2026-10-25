@@ -1,0 +1,32 @@
+{
+  "luci-app-junwrt-lights": {
+    "description": "Turn the front-panel lights off, switch single lights off or dim them",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-lights status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-lights save *": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-lights restore": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

@@ -6,11 +6,12 @@ The latest offline stability package is `output/JunWRT_AW1000_Firmware_20261015_
 
 The WebUI installer includes **Modem → Speed Test**, a router-side cellular speed test that saves each result with the serving cell and ranks cells by speed (`junwrt-speedtest run` / `towers` over SSH). It runs only when started and uses up to about 260 MB of mobile data per test. While a transfer runs, the dial shows the link's real throughput, read from the cellular interface counters twice a second.
 
-The WebUI installer also adds five opt-in **Modem** pages built from one module list (`junwrt_modules.py`):
+The WebUI installer also adds six opt-in **Modem** pages built from one module list (`junwrt_modules.py`):
 
 - **Connection Guard** re-dials the cellular interface, then restarts the modem radio and optionally reboots when the connection stays down. Off by default.
 - **Data Usage** counts the cellular bytes per day and warns before your monthly limit.
 - **Notifications** sends Telegram, ntfy or webhook alerts for connection loss, cell changes, data limit, Guard actions, slow speed tests and received SMS.
+- **Light Control** turns the front-panel lights off (the vendor lights switch, kept after a reboot), switches single lights off or dims them, and restores the factory behavior. Nothing changes until you press a button; it has not yet been run on a router.
 - **Security** reports the factory password, WAN-exposed SSH, UPnP and open Wi-Fi, with two safe one-click fixes.
 - **Support** shows the installed build, verifies the installed files against the installer's manifest and creates a redacted diagnostics bundle.
 

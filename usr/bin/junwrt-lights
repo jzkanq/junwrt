@@ -1,8 +1,9 @@
 #!/bin/sh
-# JunWRT Light Control: switch the front-panel LEDs off and keep them off.
+# JunWRT Light Control: switch the front-panel LEDs off, pick their colour, or run a light show.
 # The master switch is the vendor led_ctrld flag lights_enabled, the flag its lights button toggles.
 # led_ctrld rewrites an LED whenever its state changes (other vendor programs write LEDs too), so
-# single lights are held by a small supervisor. The panel LEDs are plain on/off GPIO LEDs: no dimming.
+# single lights are held by a small supervisor. The panel LEDs are plain on/off GPIO LEDs: no dimming,
+# and a colour is a red LED, a green LED or both (orange) on the four two-colour lights.
 # Writes only /sys/class/leds/<name>/{trigger,brightness}: no GPIO export, nothing near the RF helpers.
 
 ROOT="${JUNWRT_LIGHTS_ROOT:-}" # test hook: prefix for the paths below
@@ -14,8 +15,11 @@ LEDS="$ROOT/sys/class/leds"
 RUN_DIR="$ROOT/var/run/junwrt-lights"
 ORIG="$RUN_DIR/orig"
 ALIVE="$RUN_DIR/alive"
+DISCO="$RUN_DIR/disco"         # pattern, speed, colour and end time in uptime seconds; exists while a show is wanted
+DISCO_RUN="$RUN_DIR/disco.run" # exists while the service is running the show
 UPTIME_FILE="$ROOT/proc/uptime"
 VENDOR_INIT="${JUNWRT_LIGHTS_VENDOR:-/etc/init.d/led_ctrld.init}"
+SERVICE="${JUNWRT_LIGHTS_SERVICE:-/etc/init.d/junwrt-lights}"
 BUSY=2 # seconds between passes while a light is held
 IDLE=5 # seconds between passes while every light is left to the vendor controller
 WRITE_FAILS=0
@@ -42,6 +46,13 @@ has_word() {
 		*" $2 "*) return 0 ;;
 	esac
 	return 1
+}
+
+valid_minutes() {
+	case "$1" in
+		''|0*|*[!0-9]*) return 1 ;;
+	esac
+	[ "${#1}" -le 3 ] && [ "$1" -le 240 ]
 }
 
 # first_line FILE: sets LINE to the first line (empty when unreadable) without a subshell.
@@ -71,11 +82,12 @@ led_set() {
 	{ printf '%s\n' "$3" > "$1/$2"; } 2>/dev/null || WRITE_FAILS=$((WRITE_FAILS + 1))
 }
 
-# Master flag from the vendor controller (same values its toggle script treats as off), then our list.
+# Master flag from the vendor controller (same values its toggle script treats as off), then our two lists.
 load_config() {
 	local line key value
 	MASTER=on
 	OFF_LIST=""
+	LIT_LIST=""
 	value="$(uci -q get "$VENDOR.lights_enabled" 2>/dev/null)"
 	case "$value" in
 		0|off|false|disabled) MASTER=off ;;
@@ -90,21 +102,29 @@ load_config() {
 		key="${key%%=*}"
 		value="${value#\'}"
 		value="${value%\'}"
-		[ "$key" = off ] && OFF_LIST="$value"
+		case "$key" in
+			off) OFF_LIST="$value" ;;
+			lit) LIT_LIST="$value" ;;
+		esac
 	done <<EOF
 $(uci -q show "$CONFIG.main" 2>/dev/null)
 EOF
 	return 0
 }
 
-# wanted: something has to be held (lights off, or a dark LED).
+# wanted: something has to be held (lights off, a dark LED or a lit LED).
 wanted() {
-	[ "$MASTER" = off ] || [ -n "$OFF_LIST" ]
+	[ "$MASTER" = off ] || [ -n "$OFF_LIST" ] || [ -n "$LIT_LIST" ]
 }
 
-# held MASTER OFF_LIST NAME: succeeds when the light has to stay dark.
-held() {
-	[ "$1" = off ] || has_word "$2" "$3"
+# want_state MASTER OFF_LIST LIT_LIST NAME: sets WANT to off, lit or on (left to the router); off wins.
+want_state() {
+	WANT=on
+	if [ "$1" = off ] || has_word "$2" "$4"; then
+		WANT=off
+	elif has_word "$3" "$4"; then
+		WANT=lit
+	fi
 }
 
 # drop_name LIST NAME: LIST without NAME.
@@ -137,26 +157,38 @@ release() {
 	esac
 }
 
-# force_off PATH NAME: dark and trigger-free; call after led_read.
-force_off() {
-	if [ -z "$L_TRIG" ] || [ "$L_TRIG" = none ]; then
-		[ "$L_BRI" = 0 ] && return 0
+# set_lamp NAME 0|1: steady dark or steady lit; writes only when the LED differs.
+set_lamp() {
+	local steady=0
+	[ -d "$LEDS/$1" ] || return 0
+	led_read "$LEDS/$1"
+	{ [ -z "$L_TRIG" ] || [ "$L_TRIG" = none ]; } && steady=1
+	if [ "$2" = 1 ]; then
+		[ "$steady" = 1 ] && [ "$L_BRI" -gt 0 ] && return 0
+	else
+		[ "$steady" = 1 ] && [ "$L_BRI" = 0 ] && return 0
 	fi
-	remember "$2"
-	[ -z "$L_TRIG" ] || [ "$L_TRIG" = none ] || led_set "$1" trigger none
-	led_set "$1" brightness 0
+	remember "$1"
+	[ "$steady" = 1 ] || led_set "$LEDS/$1" trigger none
+	if [ "$2" = 1 ]; then
+		led_set "$LEDS/$1" brightness 255
+	else
+		led_set "$LEDS/$1" brightness 0
+	fi
 }
 
-# enforce: darken every LED that has to stay dark. Needs MASTER and OFF_LIST.
+# enforce: put every held LED where it belongs. Needs MASTER, OFF_LIST and LIT_LIST.
 enforce() {
 	local path led
 	for path in "$LEDS"/*; do
 		[ -d "$path" ] || continue
 		led="${path##*/}"
 		valid_name "$led" || continue
-		held "$MASTER" "$OFF_LIST" "$led" || continue
-		led_read "$path"
-		force_off "$path" "$led"
+		want_state "$MASTER" "$OFF_LIST" "$LIT_LIST" "$led"
+		case "$WANT" in
+			off) set_lamp "$led" 0 ;;
+			lit) set_lamp "$led" 1 ;;
+		esac
 	done
 }
 
@@ -198,13 +230,233 @@ restart_vendor() {
 	return 0
 }
 
+restart_self() {
+	[ -x "$SERVICE" ] || return 0
+	"$SERVICE" restart >/dev/null 2>&1
+	return 0
+}
+
 report_writes() {
 	[ "$WRITE_FAILS" -eq 0 ] || die "Saved, but $WRITE_FAILS light change(s) were refused by the hardware."
 	printf '{"success":true}\n'
 }
 
+# ---- light show ----------------------------------------------------------------------------------------------------
+
+# disco_load: reads the show file into D_PATTERN, D_SPEED, D_COLOUR, D_END and D_LEFT (seconds); fails when absent or damaged.
+disco_load() {
+	local up
+	D_LEFT=0
+	[ -f "$DISCO" ] || return 1
+	{ read -r D_PATTERN D_SPEED D_COLOUR D_END < "$DISCO"; } 2>/dev/null
+	case "$D_PATTERN" in mix|chase|pingpong|blink|alternate|wave|sparkle) ;; *) return 1 ;; esac
+	case "$D_SPEED" in slow|normal|fast) ;; *) return 1 ;; esac
+	case "$D_COLOUR" in mixed|green|red|orange) ;; *) return 1 ;; esac
+	case "$D_END" in ''|*[!0-9]*) return 1 ;; esac
+	first_line "$UPTIME_FILE"
+	up="${LINE%%.*}"
+	case "$up" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$D_END" -gt "$up" ] && D_LEFT=$((D_END - up))
+	return 0
+}
+
+# disco_end: the show is over (or never started): hand every LED back and let the vendor controller redraw.
+disco_end() {
+	local name
+	rm -f "$DISCO"
+	discover
+	for name in $LED_NAMES; do
+		release "$name"
+	done
+	restart_vendor
+	rm -f "$DISCO_RUN"
+}
+
+# disco_halt: stop a show and wait until the lights are handed back; do it here when the service is not running.
+disco_halt() {
+	local i=0
+	rm -f "$DISCO"
+	while [ -f "$DISCO_RUN" ] && [ "$i" -lt 8 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	[ -f "$DISCO_RUN" ] && disco_end
+	return 0
+}
+
+# paint RED GREEN CODE: CODE 0 dark, 1 red, 2 green, 3 both (orange). RED empty means a one-LED light.
+paint() {
+	local ron=0 gon=0
+	case "$3" in
+		1) ron=1 ;;
+		2) gon=1 ;;
+		3) ron=1; gon=1 ;;
+	esac
+	if [ -z "$1" ]; then
+		[ "$3" = 0 ] || gon=1
+	else
+		set_lamp "$1" "$ron"
+	fi
+	set_lamp "$2" "$gon"
+}
+
+# cell LIGHT FRAME: sets CODE for light 0-5 (the order of the labels under the cube) in this frame.
+cell() {
+	local i="$1" n="$2" p="$D_PATTERN" pos
+	CODE=0
+	if [ "$p" = mix ]; then
+		case $(( n / 30 % 6 )) in
+			0) p=chase ;;
+			1) p=wave ;;
+			2) p=pingpong ;;
+			3) p=blink ;;
+			4) p=sparkle ;;
+			*) p=alternate ;;
+		esac
+	fi
+	case "$D_COLOUR" in
+		green) COL=2 ;;
+		red) COL=1 ;;
+		orange) COL=3 ;;
+		*)
+			case $(( n / 6 % 3 )) in
+				0) COL=2 ;;
+				1) COL=1 ;;
+				*) COL=3 ;;
+			esac ;;
+	esac
+	case "$p" in
+		chase)
+			[ $(( n % 6 )) -eq "$i" ] && CODE="$COL" ;;
+		pingpong)
+			pos=$(( n % 10 ))
+			[ "$pos" -le 5 ] || pos=$(( 10 - pos ))
+			[ "$pos" -eq "$i" ] && CODE="$COL" ;;
+		blink)
+			[ $(( n % 2 )) -eq 0 ] && CODE="$COL" ;;
+		alternate)
+			[ $(( (n + i) % 2 )) -eq 0 ] && CODE="$COL" ;;
+		wave)
+			case $(( (n + i) % 4 )) in
+				0) CODE=2 ;;
+				1) CODE=3 ;;
+				2) CODE=1 ;;
+			esac ;;
+		sparkle)
+			RND=$(( (RND * 1103515245 + 12345) % 2147483648 ))
+			CODE=$(( RND / 65536 % 4 ))
+			[ "$D_COLOUR" = mixed ] || [ "$CODE" -eq 0 ] || CODE="$COL" ;;
+	esac
+}
+
+# frame N: draw one frame on the six lights.
+frame() {
+	local i=0 r g
+	while [ "$i" -lt 6 ]; do
+		cell "$i" "$1"
+		case "$i" in
+			0) r=status:red; g=status:green ;;
+			1) r=signal:red; g=signal:green ;;
+			2) r=; g=5g:signal ;;
+			3) r=; g=internet:single ;;
+			4) r=wifi:red; g=wifi:green ;;
+			*) r=phone:red; g=phone:green ;;
+		esac
+		paint "$r" "$g" "$CODE"
+		i=$((i + 1))
+	done
+}
+
+# disco_run: the service draws frames until the file disappears or the time is up, then hands the lights back.
+# Flashes stay at 2.5 per second or fewer even at the fastest speed.
+disco_run() {
+	local n=0 up step
+	: > "$DISCO_RUN"
+	if sleep 0.1 2>/dev/null; then
+		case "$D_SPEED" in
+			slow) step=0.8 ;;
+			fast) step=0.2 ;;
+			*) step=0.4 ;;
+		esac
+	else
+		case "$D_SPEED" in
+			slow) step=2 ;;
+			*) step=1 ;;
+		esac
+	fi
+	first_line "$UPTIME_FILE"
+	RND=$(( ${LINE%%.*} % 65521 + 1 ))
+	while [ -f "$DISCO" ]; do
+		first_line "$UPTIME_FILE"
+		up="${LINE%%.*}"
+		[ "$up" -lt "$D_END" ] || break
+		printf '%s\n' "$up" > "$ALIVE" 2>/dev/null
+		frame "$n"
+		sleep "$step" 2>/dev/null || sleep 1
+		n=$((n + 1))
+		[ -z "$JUNWRT_LIGHTS_FRAMES" ] || [ "$n" -lt "$JUNWRT_LIGHTS_FRAMES" ] || break
+	done
+	disco_end
+}
+
+# disco start [pattern=..] [speed=..] [colour=..] [minutes=..] | disco stop
+disco_cmd() {
+	local arg key value pattern=mix speed=normal colour=mixed minutes=15 up
+	case "${1:-}" in
+		stop)
+			disco_halt
+			printf '{"success":true}\n'
+			return 0 ;;
+		start) shift ;;
+		*) die "Use disco start or disco stop." ;;
+	esac
+	for arg in "$@"; do
+		case "$arg" in
+			*=*) ;;
+			*) die "Use key=value pairs." ;;
+		esac
+		key="${arg%%=*}"
+		value="${arg#*=}"
+		case "$key" in
+			pattern)
+				case "$value" in
+					mix|chase|pingpong|blink|alternate|wave|sparkle) pattern="$value" ;;
+					*) die "Unknown disco pattern." ;;
+				esac ;;
+			speed)
+				case "$value" in
+					slow|normal|fast) speed="$value" ;;
+					*) die "Speed must be slow, normal or fast." ;;
+				esac ;;
+			colour)
+				case "$value" in
+					mixed|green|red|orange) colour="$value" ;;
+					*) die "Colour must be mixed, green, red or orange." ;;
+				esac ;;
+			minutes)
+				valid_minutes "$value" || die "Minutes must be 1-240."
+				minutes="$value" ;;
+			*) die "Unknown setting: $(clean "$key" 24)." ;;
+		esac
+	done
+	discover
+	[ -n "$LED_NAMES" ] || die "This router reports no lights."
+	first_line "$UPTIME_FILE"
+	up="${LINE%%.*}"
+	case "$up" in
+		''|*[!0-9]*) die "Could not read the uptime." ;;
+	esac
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	printf '%s %s %s %s\n' "$pattern" "$speed" "$colour" $((up + minutes * 60)) > "$DISCO.tmp" && mv -f "$DISCO.tmp" "$DISCO" ||
+		die "Could not start the disco."
+	restart_self
+	printf '{"success":true}\n'
+}
+
+# ---- commands --------------------------------------------------------------------------------------------------------
+
 status() {
-	local path led sep="" mode state running=0 beat up wants=0
+	local path led sep="" mode state running=0 beat up wants=0 show=null
 	load_config
 	wanted && wants=1
 	first_line "$ALIVE"
@@ -217,13 +469,17 @@ status() {
 			*) [ "$up" -ge "$beat" ] && [ $((up - beat)) -le $((IDLE * 2 + 5)) ] && running=1 ;;
 		esac
 	fi
-	printf '{"lights":"%s","wanted":%s,"running":%s,"now":%s,"leds":[' "$MASTER" "$wants" "$running" "$(date +%s)"
+	if disco_load && [ "$D_LEFT" -gt 0 ]; then
+		show="{\"pattern\":\"$D_PATTERN\",\"speed\":\"$D_SPEED\",\"colour\":\"$D_COLOUR\",\"left\":$D_LEFT}"
+	fi
+	printf '{"lights":"%s","wanted":%s,"running":%s,"now":%s,"disco":%s,"leds":[' "$MASTER" "$wants" "$running" "$(date +%s)" "$show"
 	for path in "$LEDS"/*; do
 		[ -d "$path" ] || continue
 		led="${path##*/}"
 		valid_name "$led" || continue
 		led_read "$path"
 		mode=on
+		has_word "$LIT_LIST" "$led" && mode=lit
 		has_word "$OFF_LIST" "$led" && mode=off
 		case "$L_TRIG" in
 			''|none) if [ "$L_BRI" -gt 0 ]; then state=lit; else state=dark; fi ;;
@@ -237,10 +493,14 @@ status() {
 	printf ']}\n'
 }
 
-# save lights=on|off led.NAME=on|off ...: validated first, applied only when every pair is good.
+# save lights=on|off led.NAME=on|off|lit ...: validated first, applied only when every pair is good.
+# on leaves the LED to the router, off keeps it dark, lit keeps it lit.
 save() {
-	local arg key value name old_master old_off new_off want_master="" restart=0
+	local arg key value name was old_master old_off old_lit new_off new_lit want_master="" restart=0
 	[ $# -gt 0 ] || die "Nothing to save."
+	if disco_load && [ "$D_LEFT" -gt 0 ]; then
+		die "The disco is running. Stop it first."
+	fi
 	discover
 	for arg in "$@"; do
 		case "$arg" in
@@ -259,8 +519,8 @@ save() {
 				name="${key#led.}"
 				valid_name "$name" && has_word "$LED_NAMES" "$name" || die "Unknown light: $(clean "$name" 40)."
 				case "$value" in
-					on|off) ;;
-					*) die "A light can only be on or off; these LEDs have no brightness control." ;;
+					on|off|lit) ;;
+					*) die "A light can be on, off or lit; these LEDs cannot dim." ;;
 				esac ;;
 			*) die "Unknown setting: $(clean "$key" 24)." ;;
 		esac
@@ -268,7 +528,9 @@ save() {
 	load_config
 	old_master="$MASTER"
 	old_off="$OFF_LIST"
+	old_lit="$LIT_LIST"
 	new_off="$OFF_LIST"
+	new_lit="$LIT_LIST"
 	for arg in "$@"; do
 		key="${arg%%=*}"
 		value="${arg#*=}"
@@ -277,13 +539,16 @@ save() {
 			led.*)
 				name="${key#led.}"
 				new_off="$(drop_name "$new_off" "$name")"
+				new_lit="$(drop_name "$new_lit" "$name")"
 				[ "$value" = off ] && new_off="${new_off:+$new_off }$name"
+				[ "$value" = lit ] && new_lit="${new_lit:+$new_lit }$name"
 				;;
 		esac
 	done
 	[ -f "$CONF_FILE" ] || touch "$CONF_FILE" 2>/dev/null || die "Could not create the configuration."
 	uci -q get "$CONFIG.main" >/dev/null 2>&1 || uci -q set "$CONFIG.main=lights" || die "Could not create the configuration section."
 	put_list off "$new_off"
+	put_list lit "$new_lit"
 	uci -q delete "$CONFIG.main.dim" >/dev/null 2>&1 # retired option from the first release
 	uci -q commit "$CONFIG" || die "Could not commit the configuration."
 	if [ -n "$want_master" ] && [ "$want_master" != "$old_master" ]; then
@@ -292,9 +557,13 @@ save() {
 	fi
 	MASTER="${want_master:-$old_master}"
 	OFF_LIST="$new_off"
-	# A light coming back from dark gets its remembered state; the vendor controller then redraws it.
+	LIT_LIST="$new_lit"
+	# A light coming back to the router gets its remembered state; the vendor controller then redraws it.
 	for name in $LED_NAMES; do
-		if held "$old_master" "$old_off" "$name" && ! held "$MASTER" "$new_off" "$name"; then
+		want_state "$old_master" "$old_off" "$old_lit" "$name"
+		was="$WANT"
+		want_state "$MASTER" "$new_off" "$new_lit" "$name"
+		if [ "$was" != on ] && [ "$WANT" = on ]; then
 			release "$name"
 			restart=1
 		fi
@@ -305,9 +574,10 @@ save() {
 	report_writes
 }
 
-# restore: factory behavior. Forget our list, switch the vendor flag on and hand every LED back.
+# restore: factory behavior. Stop a show, forget our lists, switch the vendor flag on and hand every LED back.
 restore() {
 	local name
+	disco_halt
 	discover
 	uci -q delete "$CONFIG.main" >/dev/null 2>&1
 	uci -q commit "$CONFIG" >/dev/null 2>&1
@@ -324,6 +594,14 @@ run_daemon() {
 	local loops=0 pause
 	mkdir -p "$RUN_DIR" 2>/dev/null
 	while :; do
+		# A show file, or the marker of a show that was cut short, is handled before anything else.
+		if [ -f "$DISCO" ] || [ -f "$DISCO_RUN" ]; then
+			if disco_load && [ "$D_LEFT" -gt 0 ]; then
+				disco_run
+			else
+				disco_end
+			fi
+		fi
 		load_config
 		if wanted; then
 			enforce
@@ -343,6 +621,7 @@ case "${1:-}" in
 	status) status ;;
 	save) shift; save "$@" ;;
 	restore) restore ;;
+	disco) shift; disco_cmd "$@" ;;
 	daemon|run) run_daemon ;;
-	*) echo "Usage: $0 {status|save key=value...|restore|daemon}"; exit 2 ;;
+	*) echo "Usage: $0 {status|save key=value...|restore|disco start key=value...|disco stop|daemon}"; exit 2 ;;
 esac

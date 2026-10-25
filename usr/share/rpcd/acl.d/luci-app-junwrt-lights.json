@@ -1,6 +1,6 @@
 {
   "luci-app-junwrt-lights": {
-    "description": "Turn the front-panel lights off, or switch single lights off",
+    "description": "Turn the front-panel lights off, pick their colour or run a light show",
     "read": {
       "ubus": {
         "file": [
@@ -24,6 +24,9 @@
           "exec"
         ],
         "/usr/bin/junwrt-lights restore": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-lights disco *": [
           "exec"
         ]
       }

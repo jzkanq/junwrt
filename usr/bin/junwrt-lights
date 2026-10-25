@@ -1,7 +1,8 @@
 #!/bin/sh
-# JunWRT Light Control: switch the front-panel LEDs off or dim them, and keep them that way.
+# JunWRT Light Control: switch the front-panel LEDs off and keep them off.
 # The master switch is the vendor led_ctrld flag lights_enabled, the flag its lights button toggles.
-# led_ctrld rewrites an LED whenever its state changes, so single LEDs are held by a small supervisor.
+# led_ctrld rewrites an LED whenever its state changes (other vendor programs write LEDs too), so
+# single lights are held by a small supervisor. The panel LEDs are plain on/off GPIO LEDs: no dimming.
 # Writes only /sys/class/leds/<name>/{trigger,brightness}: no GPIO export, nothing near the RF helpers.
 
 ROOT="${JUNWRT_LIGHTS_ROOT:-}" # test hook: prefix for the paths below
@@ -43,25 +44,17 @@ has_word() {
 	return 1
 }
 
-valid_percent() {
-	case "$1" in
-		''|0*|*[!0-9]*) return 1 ;;
-	esac
-	[ "${#1}" -le 3 ] && [ "$1" -le 100 ]
-}
-
 # first_line FILE: sets LINE to the first line (empty when unreadable) without a subshell.
 first_line() {
 	LINE=""
 	{ read -r LINE < "$1" || [ -n "$LINE" ]; } 2>/dev/null
 }
 
-# led_read PATH: sets L_TRIG (active trigger), L_BRI and L_MAX.
+# led_read PATH: sets L_TRIG (active trigger) and L_BRI.
 led_read() {
 	local t
 	L_TRIG=""
 	L_BRI=0
-	L_MAX=1
 	first_line "$1/trigger"
 	case "$LINE" in
 		*\[*\]*) t="${LINE#*\[}"; L_TRIG="${t%%\]*}" ;;
@@ -71,11 +64,6 @@ led_read() {
 		''|*[!0-9]*) ;;
 		*) L_BRI="$LINE" ;;
 	esac
-	first_line "$1/max_brightness"
-	case "$LINE" in
-		''|*[!0-9]*) ;;
-		*) L_MAX="$LINE" ;;
-	esac
 }
 
 # led_set PATH FILE VALUE: one sysfs write; a refusal is counted and reported, never fatal.
@@ -83,12 +71,11 @@ led_set() {
 	{ printf '%s\n' "$3" > "$1/$2"; } 2>/dev/null || WRITE_FAILS=$((WRITE_FAILS + 1))
 }
 
-# Master flag from the vendor controller (same values its toggle script treats as off), then our lists.
+# Master flag from the vendor controller (same values its toggle script treats as off), then our list.
 load_config() {
 	local line key value
 	MASTER=on
 	OFF_LIST=""
-	DIM_LIST=""
 	value="$(uci -q get "$VENDOR.lights_enabled" 2>/dev/null)"
 	case "$value" in
 		0|off|false|disabled) MASTER=off ;;
@@ -103,56 +90,30 @@ load_config() {
 		key="${key%%=*}"
 		value="${value#\'}"
 		value="${value%\'}"
-		case "$key" in
-			off) OFF_LIST="$value" ;;
-			dim) DIM_LIST="$value" ;;
-		esac
+		[ "$key" = off ] && OFF_LIST="$value"
 	done <<EOF
 $(uci -q show "$CONFIG.main" 2>/dev/null)
 EOF
 	return 0
 }
 
-# wanted: something has to be held (lights off, a dark LED or a dimmed LED).
+# wanted: something has to be held (lights off, or a dark LED).
 wanted() {
-	[ "$MASTER" = off ] || [ -n "$OFF_LIST" ] || [ -n "$DIM_LIST" ]
+	[ "$MASTER" = off ] || [ -n "$OFF_LIST" ]
 }
 
-# dim_of NAME: sets DIM_PCT and succeeds when NAME has a valid brightness percentage.
-dim_of() {
-	local item
-	DIM_PCT=""
-	for item in $DIM_LIST; do
-		if [ "${item%%=*}" = "$1" ]; then
-			DIM_PCT="${item#*=}"
-			valid_percent "$DIM_PCT"
-			return
-		fi
-	done
-	return 1
+# held MASTER OFF_LIST NAME: succeeds when the light has to stay dark.
+held() {
+	[ "$1" = off ] || has_word "$2" "$3"
 }
 
-# drop_name LIST NAME: LIST without NAME or NAME=value.
+# drop_name LIST NAME: LIST without NAME.
 drop_name() {
 	local item out=""
 	for item in $1; do
-		[ "${item%%=*}" = "$2" ] || out="${out:+$out }$item"
+		[ "$item" = "$2" ] || out="${out:+$out }$item"
 	done
 	printf '%s' "$out"
-}
-
-# eff_state MASTER OFF_LIST DIM_LIST NAME: sets EFF to off, dim or on.
-eff_state() {
-	local item
-	EFF=on
-	if [ "$1" = off ] || has_word "$2" "$4"; then
-		EFF=off
-		return 0
-	fi
-	for item in $3; do
-		[ "${item%%=*}" = "$4" ] && EFF=dim
-	done
-	return 0
 }
 
 # remember NAME: keep how the LED looked before our first change this boot (after led_read).
@@ -186,27 +147,16 @@ force_off() {
 	led_set "$1" brightness 0
 }
 
-# enforce: drive each LED toward the wanted state. Needs MASTER, OFF_LIST and DIM_LIST.
+# enforce: darken every LED that has to stay dark. Needs MASTER and OFF_LIST.
 enforce() {
-	local path led raw
+	local path led
 	for path in "$LEDS"/*; do
 		[ -d "$path" ] || continue
 		led="${path##*/}"
 		valid_name "$led" || continue
-		if [ "$MASTER" = off ] || has_word "$OFF_LIST" "$led"; then
-			led_read "$path"
-			force_off "$path" "$led"
-		elif dim_of "$led"; then
-			led_read "$path"
-			# Only a steady light is dimmed: a blinking one is the vendor's activity signal.
-			[ -z "$L_TRIG" ] || [ "$L_TRIG" = none ] || continue
-			[ "$L_BRI" -gt 0 ] && [ "$L_MAX" -gt 1 ] || continue
-			raw=$(( (L_MAX * DIM_PCT + 50) / 100 ))
-			[ "$raw" -ge 1 ] || raw=1
-			[ "$raw" -ne "$L_BRI" ] || continue
-			remember "$led"
-			led_set "$path" brightness "$raw"
-		fi
+		held "$MASTER" "$OFF_LIST" "$led" || continue
+		led_read "$path"
+		force_off "$path" "$led"
 	done
 }
 
@@ -254,7 +204,7 @@ report_writes() {
 }
 
 status() {
-	local path led sep="" mode level state running=0 beat up wants=0
+	local path led sep="" mode state running=0 beat up wants=0
 	load_config
 	wanted && wants=1
 	first_line "$ALIVE"
@@ -274,28 +224,22 @@ status() {
 		valid_name "$led" || continue
 		led_read "$path"
 		mode=on
-		level=100
-		if has_word "$OFF_LIST" "$led"; then
-			mode=off
-		elif dim_of "$led"; then
-			mode=dim
-			level="$DIM_PCT"
-		fi
+		has_word "$OFF_LIST" "$led" && mode=off
 		case "$L_TRIG" in
 			''|none) if [ "$L_BRI" -gt 0 ]; then state=lit; else state=dark; fi ;;
 			timer) state=blink ;;
 			*) state=auto ;;
 		esac
-		printf '%s{"name":"%s","max":%s,"brightness":%s,"trigger":"%s","state":"%s","mode":"%s","level":%s}' \
-			"$sep" "$led" "$L_MAX" "$L_BRI" "$(clean "$L_TRIG" 32)" "$state" "$mode" "$level"
+		printf '%s{"name":"%s","brightness":%s,"trigger":"%s","state":"%s","mode":"%s"}' \
+			"$sep" "$led" "$L_BRI" "$(clean "$L_TRIG" 32)" "$state" "$mode"
 		sep=,
 	done
 	printf ']}\n'
 }
 
-# save lights=on|off led.NAME=on|off|1-100 ...: validated first, applied only when every pair is good.
+# save lights=on|off led.NAME=on|off ...: validated first, applied only when every pair is good.
 save() {
-	local arg key value name was old_master old_off old_dim new_off new_dim want_master="" restart=0
+	local arg key value name old_master old_off new_off want_master="" restart=0
 	[ $# -gt 0 ] || die "Nothing to save."
 	discover
 	for arg in "$@"; do
@@ -316,12 +260,7 @@ save() {
 				valid_name "$name" && has_word "$LED_NAMES" "$name" || die "Unknown light: $(clean "$name" 40)."
 				case "$value" in
 					on|off) ;;
-					*)
-						valid_percent "$value" || die "Brightness must be 1-100."
-						if [ "$value" != 100 ]; then
-							led_read "$LEDS/$name"
-							[ "$L_MAX" -gt 1 ] || die "$(clean "$name" 40) has no brightness control."
-						fi ;;
+					*) die "A light can only be on or off; these LEDs have no brightness control." ;;
 				esac ;;
 			*) die "Unknown setting: $(clean "$key" 24)." ;;
 		esac
@@ -329,9 +268,7 @@ save() {
 	load_config
 	old_master="$MASTER"
 	old_off="$OFF_LIST"
-	old_dim="$DIM_LIST"
 	new_off="$OFF_LIST"
-	new_dim="$DIM_LIST"
 	for arg in "$@"; do
 		key="${arg%%=*}"
 		value="${arg#*=}"
@@ -340,18 +277,14 @@ save() {
 			led.*)
 				name="${key#led.}"
 				new_off="$(drop_name "$new_off" "$name")"
-				new_dim="$(drop_name "$new_dim" "$name")"
-				case "$value" in
-					off) new_off="${new_off:+$new_off }$name" ;;
-					on|100) ;;
-					*) new_dim="${new_dim:+$new_dim }$name=$value" ;;
-				esac ;;
+				[ "$value" = off ] && new_off="${new_off:+$new_off }$name"
+				;;
 		esac
 	done
 	[ -f "$CONF_FILE" ] || touch "$CONF_FILE" 2>/dev/null || die "Could not create the configuration."
 	uci -q get "$CONFIG.main" >/dev/null 2>&1 || uci -q set "$CONFIG.main=lights" || die "Could not create the configuration section."
 	put_list off "$new_off"
-	put_list dim "$new_dim"
+	uci -q delete "$CONFIG.main.dim" >/dev/null 2>&1 # retired option from the first release
 	uci -q commit "$CONFIG" || die "Could not commit the configuration."
 	if [ -n "$want_master" ] && [ "$want_master" != "$old_master" ]; then
 		set_master "$want_master"
@@ -359,15 +292,12 @@ save() {
 	fi
 	MASTER="${want_master:-$old_master}"
 	OFF_LIST="$new_off"
-	DIM_LIST="$new_dim"
-	# A light coming back from dark or dimmed gets its remembered state; the vendor controller then redraws it.
+	# A light coming back from dark gets its remembered state; the vendor controller then redraws it.
 	for name in $LED_NAMES; do
-		eff_state "$old_master" "$old_off" "$old_dim" "$name"
-		was="$EFF"
-		eff_state "$MASTER" "$new_off" "$new_dim" "$name"
-		case "$was:$EFF" in
-			off:on|off:dim|dim:on) release "$name"; restart=1 ;;
-		esac
+		if held "$old_master" "$old_off" "$name" && ! held "$MASTER" "$new_off" "$name"; then
+			release "$name"
+			restart=1
+		fi
 	done
 	[ "$MASTER" = off ] && enforce
 	[ "$restart" = 1 ] && restart_vendor
@@ -375,7 +305,7 @@ save() {
 	report_writes
 }
 
-# restore: factory behavior. Forget our lists, switch the vendor flag on and hand every LED back.
+# restore: factory behavior. Forget our list, switch the vendor flag on and hand every LED back.
 restore() {
 	local name
 	discover

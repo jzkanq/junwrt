@@ -11,7 +11,7 @@ The WebUI installer also adds six opt-in **Modem** pages built from one module l
 - **Connection Guard** re-dials the cellular interface, then restarts the modem radio and optionally reboots when the connection stays down. Off by default.
 - **Data Usage** counts the cellular bytes per day and warns before your monthly limit.
 - **Notifications** sends Telegram, ntfy or webhook alerts for connection loss, cell changes, data limit, Guard actions, slow speed tests and received SMS.
-- **Light Control** turns the front-panel lights off (the vendor lights switch, kept after a reboot), switches single lights off or dims them, and restores the factory behavior. Nothing changes until you press a button; it has not yet been run on a router.
+- **Light Control** turns the front-panel lights off (the vendor lights switch, kept after a reboot), switches each of the six lights off, and restores the factory behavior. The lights are on/off LEDs, so there is no dimming. Nothing changes until you press a button.
 - **Security** reports the factory password, WAN-exposed SSH, UPnP and open Wi-Fi, with two safe one-click fixes.
 - **Support** shows the installed build, verifies the installed files against the installer's manifest and creates a redacted diagnostics bundle.
 

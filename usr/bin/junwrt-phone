@@ -1,0 +1,349 @@
+#!/usr/bin/ruby
+# AW1000 Si32184 phone service. Only SPI0 and ALSA voice controls are used.
+module JunPhone
+  ROUTES = ['PCM_2_PB_CH1 ETDM_CAP_CH1', 'ETDM_PB_CH1 PCM_2_CAP_CH1', 'ETDM_PB_CH1 PCM_2_CAP_CH2'].freeze
+  class Spi
+    def initialize
+      @f=File.open('/dev/spidev0.0',File::RDWR)
+      @f.ioctl(0x40016b01,[0].pack('C'))
+    end
+    def transfer(bytes)
+      tx=bytes.pack('C*');rx="\0"*tx.bytesize
+      msg=[[tx].pack('P').unpack('Q')[0],[rx].pack('P').unpack('Q')[0],tx.bytesize,0,0,8,0,0,0,0].pack('QQLLSCCCCS')
+      @f.ioctl(0x40206b00,msg);rx.unpack('C*')
+    end
+    def read(r);transfer([0x60,r,0,0])[2];end
+    def write(r,v);transfer([0x20,r,v,v]);end
+    def wait_ram
+      deadline=Time.now+1
+      while read(4)&1!=0
+        raise 'SPI RAM timeout' if Time.now>deadline
+        sleep 0.001
+      end
+    end
+    def ram_write(a,v)
+      wait_ram
+      [[5,(a>>3)&0xe0],[6,(v<<3)&0xf8],[7,(v>>5)&255],[8,(v>>13)&255],[9,(v>>21)&255],[10,a&255]].each{|r,x|write(r,x)}
+      wait_ram
+    end
+    def ram_read(a)
+      wait_ram;write(5,(a>>3)&0xe0);write(10,a&255);wait_ram
+      ([9,8,7,6].inject(0){|v,r|(v<<8)|read(r)})>>3
+    end
+    def healthy?
+      write(3,255);read(3)==31
+    end
+    def hook
+      healthy? ? (read(34)&2!=0) : nil
+    end
+    def linefeed(v)
+      a=read(80);write(80,a&~4);write(30,v);write(80,a)
+    end
+    def tone(on,busy=false)
+      [50,52,54,56].each{|r|write(r,busy ? 0xa0 : 0);write(r+1,busy ? 15 : 0)}
+      write(49,on ? (busy ? 0x77 : 0x11) : 0)
+    end
+  end
+
+  # The trace contains the vendor's constant writes, patch verification and
+  # bounded calibration polls. Calibration results are measured afresh, never replayed.
+  def self.initialize_chip(spi,path,sleeper=lambda{|s|sleep s})
+    raise 'Unexpected SPI0 chip ID' unless spi.read(0)==0xa2
+    raise 'No ETDM clock' unless spi.healthy?
+    File.foreach(path) do |line|
+      next if line.start_with?('#') || line.strip.empty?
+      op,*args=line.split;a=args.map{|s|Integer(s)}
+      case op
+      when 'w';spi.write(a[0],a[1])
+      when 'W';spi.ram_write(a[0],a[1])
+      when 'u'
+        # Unlock toggles USERMODE: a blind replay would lock an initialized chip.
+        [2,8,14,0].each{|v|spi.write(126,v)} if spi.read(126)&1==0
+        raise 'ProSLIC user mode unavailable' unless spi.read(126)&1==1
+      when 'd';sleeper.call(a[0]/1000.0)
+      when 'v'
+        actual=spi.ram_read(a[0]);raise "ProSLIC patch verification failed: expected #{a[1]}, read #{actual}" unless actual==a[1]
+      when 'p'
+        done=false
+        500.times do
+          if spi.read(29)&128==0 then done=true;break end
+          sleeper.call(0.01)
+        end
+        raise 'ProSLIC calibration timeout' unless done
+      when 'b'
+        ok=false
+        100.times do
+          target=spi.ram_read(767);actual=spi.ram_read(3)
+          if actual>=target-5*1_074_000 && actual<80*1_074_000 then ok=true;break end
+          sleeper.call(0.01)
+        end
+        raise 'ProSLIC DC-DC voltage check failed' unless ok
+      else;raise "Invalid init operation #{op}"
+      end
+    end
+    spi.write(12,1);spi.write(14,1);spi.write(23,0x13)
+    raise 'ProSLIC final status failed' unless spi.healthy? && spi.read(30)==17 && spi.ram_read(3)>40*1_074_000
+  end
+
+  class Dtmf
+    FREQ=[697,770,852,941,1209,1336,1477,1633].freeze
+    KEYS='123A456B789C*0#D'
+    def initialize
+      @co=FREQ.map{|f|2*Math.cos(2*Math::PI*f/8000)}
+      reset
+    end
+    def reset;@candidate=nil;@stable=0;@held=nil;@quiet=0;end
+    def classify(samples)
+      avg=samples.inject(0.0,:+)/samples.size
+      z=samples.map{|v|v-avg};e=z.inject(0.0){|s,v|s+v*v}
+      return nil if e<samples.size*2500
+      powers=@co.map do |c|
+        s1=s2=0.0
+        z.each{|v|s=v+c*s1-s2;s2=s1;s1=s}
+        s1*s1+s2*s2-c*s1*s2
+      end
+      low=(0..3).sort_by{|i|-powers[i]};high=(4..7).sort_by{|i|-powers[i]}
+      l,h=low[0],high[0];ratio=powers[l]/[powers[h],1].max
+      return nil unless powers[l]>3*powers[low[1]] && powers[h]>3*powers[high[1]] && ratio>0.1 && ratio<10 && 2*(powers[l]+powers[h])/(samples.size*e)>0.5
+      KEYS[l*4+h-4]
+    end
+    def feed(samples)
+      d=classify(samples)
+      if d.nil?
+        @quiet+=1;@held=nil if @quiet>=3
+        @candidate=nil;@stable=0;return nil
+      end
+      @quiet=0
+      @stable=d==@candidate ? @stable+1 : 1;@candidate=d
+      return nil unless @stable>=2 && @held!=d
+      @held=d;d
+    end
+  end
+
+  # A pure state machine: the adapter owns hardware, processes and modem calls.
+  class Controller
+    attr_reader :state,:digits
+    def initialize(io)
+      @io=io;@state=:idle;@digits='';@last_digit=0;@lift=0;@speech=false;@owned=false
+    end
+    def finish(busy=false)
+      @io.hangup if @owned
+      @io.speech(false) if @speech
+      @speech=false;@owned=false;@io.routes(false);@io.clock(true);@io.linefeed(1)
+      @io.tone(busy,busy);@state=busy ? :busy : :idle;@digits=''
+    end
+    def start_call(incoming,now)
+      if !incoming && (!@digits.match?(/\A\+?[0-9]{3,20}\z/) || !@io.allowed?(@digits))
+        @io.tone(true,true);@state=:busy;return
+      end
+      @io.tone(false);@io.linefeed(1);@io.clock(false)
+      incoming ? @io.answer : @io.dial(@digits)
+      @owned=true;@call_started=now
+      # The adapter checks call status immediately before Speech_on.
+      @io.speech(true);@speech=true;@io.routes(true);@state=:call
+    rescue => e
+      @io.log("call refused: #{e.message}");finish(true)
+    end
+    def tick(now,hook,states,digit=nil)
+      if @state==:call
+        finish(false) if hook==false
+        finish(hook==true) if @state==:call && states.empty? && now-@call_started>=2
+        return
+      end
+      if @state==:ringing
+        if !states.include?(4)
+          @io.linefeed(1);@state=:idle
+        elsif hook==true
+          start_call(true,now)
+        end
+        return
+      end
+      if states.include?(4)
+        @io.tone(false);@io.linefeed(4);@state=:ringing;return
+      end
+      return if hook.nil?
+      if hook==false
+        if @state!=:idle then @io.tone(false);@state=:idle;@digits='' end
+        return
+      end
+      if @state==:idle
+        @digits='';@lift=now;@last_digit=now;@io.tone(true);@state=:digits
+      end
+      return unless @state==:digits
+      if digit
+        @io.tone(false)
+        if digit=='#'
+          start_call(false,now);return
+        end
+        @digits+=digit if @digits.size<20
+        @last_digit=now;@io.log("digit count=#{@digits.size}")
+      end
+      start_call(false,now) if !@digits.empty? && now-@last_digit>=4
+      if @state==:digits && now-@lift>=60 then @io.tone(true,true);@state=:busy end
+    end
+  end
+
+  class Runtime
+    attr_reader :spi
+    def initialize
+      @spi=Spi.new;@capture=nil;@buf=''.b;@decoder=Dtmf.new;@speech=false;@routes=false
+      @test_number=ENV['JUNWRT_PHONE_TEST_NUMBER'];@owned=false;@lock=Mutex.new;@capture_error=nil
+    end
+    def log(s);STDOUT.puts("#{Time.now.utc} #{s}");STDOUT.flush;end
+    # No shell parsing, eval, networking changes, IMS writes or RF GPIO access.
+    def command(*argv)
+      r,w=IO.pipe
+      pid=Process.spawn(*argv,out:w,err:w);w.close
+      output='';deadline=Time.now+12;status=nil
+      loop do
+        if IO.select([r],nil,nil,0.02)
+          begin;output<<r.read_nonblock(16384);rescue IO::WaitReadable,EOFError;end
+        end
+        got=Process.waitpid2(pid,Process::WNOHANG)
+        if got then status=got[1];break end
+        raise "Command timed out: #{argv[0]}" if Time.now>deadline
+      end
+      begin;output<<r.read;rescue IOError;end
+      raise "Command failed: #{argv[0]} #{output[0,160]}" unless status.success?
+      output
+    ensure
+      w.close rescue nil;r.close rescue nil
+      if pid && !status
+        Process.kill('KILL',pid) rescue nil
+        Process.waitpid(pid) rescue nil
+      end
+    end
+    def mix(n,v);command('amixer','-c','0','cset',"name=#{n}",v.to_s);end
+    def states
+      out=command('mipc_wan_cli','--get_call_status')
+      raise 'Invalid call status' unless out.match?(/result:0,count:\d+/)
+      out.scan(/call_state\[\d+\]:(\d+)/).flatten.map(&:to_i)
+    end
+    def allowed?(digits);@test_number.nil? || @test_number==digits;end
+    def dial(d);raise 'Test number restriction' unless allowed?(d);command('mipc_wan_cli',"--dial_request=#{d}");@owned=true;end
+    def answer;command('mipc_wan_cli','--answer_ringing');@owned=true;end
+    def hangup;command('mipc_wan_cli','--hangup_all');@owned=false;end
+    def speech(on)
+      if on
+        confirmed=false
+        30.times do
+          if states.any?{|s|[0,2,3].include?(s)} then confirmed=true;break end
+          sleep 0.1
+        end
+        raise 'No dialing or active call; Speech_on prohibited' unless confirmed
+      end
+      command('amixer','-D','mtk_phonecall','cset','numid=1',on ? '1' : '0')
+      @speech=on
+      sleep 1 if on
+    end
+    def routes(on)
+      # Keep vendor I2S routes on: they supply a necessary clock dependency.
+      ROUTES.each{|n|mix(n,on ? 1 : 0)}
+      mix('ETDM_HD_Mux','Low_Jitter') if on
+      mix('ETDM_LPBK_OUT_MUX',0) if on
+      @routes=on
+    end
+    def clock(on)
+      if !on
+        if @capture
+          Process.kill('TERM',@capture.pid) rescue nil
+          @capture.close rescue nil
+          @reader.join(1) if @reader
+          @reader.kill if @reader && @reader.alive?
+          @capture=nil
+        end
+        return
+      end
+      return if @capture && !@capture.closed?
+      ['UL1_CH1 ETDM_CAP_CH1','UL1_CH2 ETDM_CAP_CH1'].each{|n|mix(n,1)}
+      mix('ETDM_HD_Mux','Low_Jitter');mix('ETDM_PCM1_MUX','PCM');mix('ETDM_LPBK_OUT_MUX',0)
+      @capture=IO.popen(['arecord','-q','-D','hw:0,5','-f','S16_LE','-r','8000','-c','2','-t','raw','-'],'rb')
+      @lock.synchronize{@buf=''.b};@capture_error=nil;@decoder.reset
+      stream=@capture
+      @reader=Thread.new do
+        begin
+          loop do
+            chunk=stream.readpartial(4096)
+            @lock.synchronize do
+              @buf<<chunk
+              @buf=@buf.byteslice(-65536,65536) if @buf.bytesize>65536
+            end
+          end
+        rescue EOFError,IOError => e
+          @capture_error=e.message
+        end
+      end
+      sleep 0.2
+      raise 'ETDM capture did not start' if Process.waitpid(@capture.pid,Process::WNOHANG)
+    end
+    def digits
+      return [] unless @capture
+      raise 'ETDM capture stopped' if @capture_error
+      @lock.synchronize do
+      found=[]
+      while @buf.bytesize>=820
+        samples=@buf.byteslice(0,820).unpack('s<*').each_slice(2).map(&:first)
+        @buf=@buf.byteslice(408,@buf.bytesize-408)
+        d=@decoder.feed(samples);found<<d if d
+      end
+      found
+      end
+    end
+    def linefeed(v);@spi.linefeed(v);end
+    def tone(on,busy=false);@spi.tone(on,busy);end
+    def run(trace)
+      @instance_lock=File.open('/var/run/junwrt-phone.lock',File::RDWR|File::CREAT,0600)
+      raise 'Phone service already running' unless @instance_lock.flock(File::LOCK_EX|File::LOCK_NB)
+      raise 'Existing call: leave phone hardware unchanged' unless states.empty?
+      clock(true)
+      JunPhone.initialize_chip(@spi,trace)
+      mix('ETDM_LPBK_OUT_MUX',0);tone(false);@controller=Controller.new(self)
+      log 'ready: Si32184, idle PCM 8kHz, slots 1/1'
+      @running=true;Signal.trap('TERM'){@running=false};Signal.trap('INT'){@running=false}
+      current=[];last_poll=Time.now-1;unknown_since=nil;bad_clock=0
+      while @running
+        if Time.now-last_poll>=0.5
+          begin
+            current=states;unknown_since=nil
+          rescue => e
+            unknown_since||=Time.now
+            raise e if Time.now-unknown_since>10
+            log "temporary status error: #{e.message}"
+          end
+          last_poll=Time.now
+        end
+        hook=@spi.hook;bad_clock=hook.nil? ? bad_clock+1 : 0
+        raise 'PCM clock lost for 5 seconds' if bad_clock>=100
+        ds=digits
+        @controller.tick(Time.now.to_f,hook,current)
+        ds.each{|d|@controller.tick(Time.now.to_f,hook,current,d)}
+        sleep 0.02
+      end
+    ensure
+      cleanup
+    end
+    def cleanup
+      # A refused start must not hang up somebody else's existing call.
+      hangup rescue nil if @owned
+      if @speech
+        hangup rescue nil
+        speech(false) rescue nil
+      end
+      routes(false) rescue nil if @routes
+      if @capture
+        tone(false) rescue nil
+        @spi.linefeed(0) rescue nil
+      end
+      clock(false)
+    end
+  end
+end
+
+if __FILE__==$0
+  begin
+    JunPhone::Runtime.new.run(ARGV[0] || '/usr/share/junwrt-phone/si32184-init.txt')
+  rescue => e
+    STDERR.puts("junwrt-phone: #{e.message}")
+    exit 1
+  end
+end

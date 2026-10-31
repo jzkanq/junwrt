@@ -1,0 +1,35 @@
+{
+  "luci-app-junwrt-phone": {
+    "description": "View phone history and control the RJ11 phone",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-phone-ui status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-phone-ui dial *": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-phone-ui answer": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-phone-ui hangup": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

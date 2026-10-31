@@ -1,0 +1,53 @@
+#!/usr/bin/lua
+local json = require 'luci.jsonc'
+local fs = require 'nixio.fs'
+local nixio = require 'nixio'
+local base = '/var/run/junwrt-phone/'
+local function emit(data) io.write((json.stringify(data):gsub('"calls":%s*{}', '"calls":[]')) .. '\n') end
+local function fail(message) emit({error=message}); os.exit(1) end
+local function fields(line)
+    local out = {}
+    for part in ((line or '') .. '\t'):gmatch('(.-)\t') do out[#out+1] = part end
+    return out
+end
+local function status()
+    local v = fields(fs.readfile(base .. 'status'))
+    local age = os.time() - (tonumber(v[1]) or 0)
+    local calls = {}
+    for line in (fs.readfile('/etc/junwrt-phone/calls') or ''):gmatch('[^\n]+') do
+        local c = fields(line)
+        if #c == 7 then calls[#calls+1] = {id=c[1], started=tonumber(c[2]), direction=c[3], number=c[4], result=c[5], duration=tonumber(c[6]), ended=tonumber(c[7])} end
+        if #calls >= 100 then break end
+    end
+    return {online=age >= 0 and age <= 5, state=v[2] or 'unavailable', hook=v[3] or 'unknown',
+        states=v[4] or '', number=v[5] or '', direction=v[6] or '', started=tonumber(v[7]) or 0,
+        connected=tonumber(v[8]) or 0, calls=calls, now=os.time()}
+end
+local op = arg[1] or 'status'
+if op == 'status' and not arg[2] then emit(status()); return end
+if op ~= 'dial' and op ~= 'answer' and op ~= 'hangup' then fail('Unknown phone action.') end
+local number = arg[2] or ''
+if op == 'dial' then
+    local digits = number:gsub('^%+', '')
+    if not digits:match('^%d+$') or #digits < 3 or #digits > 20 or arg[3] then fail('Enter 3 to 20 digits, with an optional leading +.') end
+elseif arg[2] then fail('Unexpected argument.') end
+if not status().online then fail('Phone service is offline.') end
+local id = tostring(os.time()) .. '-' .. tostring(nixio.getpid())
+local path = base .. 'request-' .. id
+local tmp = path .. '.tmp'
+local f = io.open(tmp, 'w')
+if not f then fail('Cannot write phone request.') end
+local wrote = f:write(op .. '\t' .. number .. '\t' .. os.time())
+local closed = f:close()
+if not wrote or not closed or not os.rename(tmp, path) then os.remove(tmp); fail('Cannot publish phone request.') end
+for i=1,150 do
+    local response = fs.readfile(base .. 'reply-' .. id)
+    if response then
+        os.remove(base .. 'reply-' .. id)
+        if response:sub(1,1) ~= '1' then fail(response:sub(3)) end
+        emit({success=true}); return
+    end
+    nixio.nanosleep(0,100000000)
+end
+os.remove(path)
+fail('Phone action timed out. Refresh the call status before retrying.')

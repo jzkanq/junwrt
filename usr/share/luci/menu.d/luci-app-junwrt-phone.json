@@ -1,0 +1,15 @@
+{
+  "admin/modem/phone": {
+    "title": "Phone",
+    "order": 48,
+    "action": {
+      "type": "view",
+      "path": "modem/phone-v4"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-phone"
+      ]
+    }
+  }
+}

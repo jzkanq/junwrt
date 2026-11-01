@@ -1,0 +1,149 @@
+#!/usr/bin/lua
+-- MediaTek telemetry and guarded per-client disconnect. Credentials only through connections.
+local json = require 'luci.jsonc'
+local function emit(value)
+    -- luci.jsonc encodes an empty Lua table as {}, but the view requires arrays.
+    local output = json.stringify(value):gsub('"stations":%s*{}', '"stations":[]')
+    io.write((output:gsub('"connections":%s*{}', '"connections":[]')) .. '\n')
+end
+local function fail(message) emit({error=message}); os.exit(1) end
+local action = arg[1]
+if action ~= 'status' and action ~= 'connections' and action ~= 'disconnect' then fail('Unsupported Wi-Fi status action.') end
+if action ~= 'disconnect' and arg[2] then fail('Unexpected Wi-Fi status argument.') end
+local function unicast(mac)
+    return type(mac) == 'string' and mac:match('^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$') and
+        mac ~= '00:00:00:00:00:00' and tonumber(mac:sub(1,2),16)%2 == 0
+end
+if action == 'disconnect' and (arg[4] or not arg[2] or not arg[2]:match('^ra[inx]*%d+$') or not unicast(arg[3])) then fail('Invalid disconnect target.') end
+local function native(command, name, mac)
+    -- Only fixed actions and separately validated interface/MAC characters reach this command.
+    if command ~= 'status' and command ~= 'disconnect' then return nil end
+    if not name:match('^ra[inx]*%d+$') or (mac and not unicast(mac)) then return nil end
+    local pipe = io.popen('/usr/bin/junwrt-wifi-native ' .. command .. ' ' .. name .. (mac and (' ' .. mac) or '') .. ' 2>/dev/null', 'r')
+    if not pipe then return nil end
+    local output = pipe:read('*a'); pipe:close()
+    if not output or output:sub(1,3) ~= 'OK\n' then return nil end
+    return output:sub(4)
+end
+local function station_rows(output)
+    local rows = {}
+    for line in output:gmatch('[^\n]+') do
+        local mac, signal, tx, rx = line:match('^([^\t]+)\t([^\t]*)\t([^\t]*)\t([^\t]*)$')
+        if unicast(mac) then
+            signal, tx, rx = tonumber(signal), tonumber(tx), tonumber(rx)
+            local row = {mac=mac:upper()}
+            if signal and signal >= -120 and signal < 0 then row.signal = signal end
+            if tx and tx > 0 and tx <= 10000 then row.tx = {rate=tx*1000} end
+            if rx and rx > 0 and rx <= 10000 then row.rx = {rate=rx*1000} end
+            rows[#rows+1] = row
+        else return nil end
+    end
+    return rows
+end
+local function token(value, index)
+    local tokens = {}
+    for item in ((value or '') .. ';'):gmatch('(.-);') do tokens[#tokens+1] = item end
+    return tokens[index] or tokens[1] or ''
+end
+local function security(profile, index)
+    local auth = token(profile.AuthMode, index):upper()
+    local encryption = token(profile.EncrypType, index):upper()
+    if auth == 'OPEN' and (encryption == 'NONE' or encryption == '') then return 'Open network', 'nopass' end
+    local modes = {WPAPSK='WPA Personal', WPA2PSK='WPA2 Personal', WPAPSKWPA2PSK='WPA/WPA2 Personal', WPA2PSKSAE='WPA2/WPA3 Personal'}
+    if modes[auth] then return modes[auth], 'WPA' end
+    if auth == 'SAE' then return 'WPA3 Personal', nil end
+    if encryption == 'WEP' then return 'WEP', nil end
+    return 'Unsupported security mode', nil
+end
+local function width(profile, band)
+    if profile.HT_BW == '0' then return '20 MHz' end
+    if profile.HT_BW ~= '1' then return nil end
+    if band == '2.4G' then return profile.HT_BSSCoexistence == '1' and '20/40 MHz' or '40 MHz' end
+    return ({['0']='40 MHz', ['1']='80 MHz', ['2']='160 MHz', ['3']='80+80 MHz'})[profile.VHT_BW]
+end
+local ok, wifi = pcall(require, 'mtkwifi')
+if not ok then fail('MediaTek Wi-Fi telemetry is unavailable.') end
+local mapped, devices = pcall(wifi.__get_l1dat)
+if not mapped or type(devices) ~= 'table' then fail('Wi-Fi radio map is unavailable.') end
+local networks, connections, errors, seen = {}, {}, {}, {}
+for _, dev in ipairs(devices) do
+    -- l1profile can describe two radios separated by semicolons.
+    local names, paths = {}, {}
+    for name in (dev.main_ifname or ''):gmatch('[^;]+') do names[#names+1] = name end
+    for path in (dev.profile_path or ''):gmatch('[^;]+') do paths[#paths+1] = path end
+    for i, name in ipairs(names) do
+        if name:match('^ra[inx]*%d+$') and not seen[name] then
+            seen[name] = true
+            local flags = tonumber(wifi.readfile('/sys/class/net/' .. name .. '/flags') or '')
+            if flags then
+                if action == 'disconnect' and name == arg[2] then
+                    if flags%2 ~= 1 then fail('This Wi-Fi radio is not active.') end
+                    if native('disconnect', name, arg[3]:upper()) == nil then fail('Disconnect request failed or the device is no longer associated.') end
+                    emit({success=true, message='Disconnect request sent. The device may reconnect.'}); return
+                end
+                local loaded, profile = pcall(wifi.load_profile, paths[i] or '')
+                profile = loaded and type(profile) == 'table' and profile or {}
+                if action == 'connections' and not profile.SSID1 then errors[#errors+1] = name .. ': connection profile unavailable' end
+                local band = wifi.band(tonumber((profile.WirelessMode or ''):match('^%d+')) or 0)
+                if action == 'connections' then
+                    local prefix = token(dev.ext_ifname, i)
+                    if prefix == '' then prefix = name:gsub('%d+$', '') end
+                    local count = math.min(16, math.max(1, tonumber(profile.BssidNum) or 1))
+                    for bssid=1,count do
+                        local ifname = bssid == 1 and name or prefix .. (bssid-1)
+                        local vif_flags = ifname:match('^ra[inx]*%d+$') and tonumber(wifi.readfile('/sys/class/net/' .. ifname .. '/flags') or '')
+                        if vif_flags and vif_flags%2 == 1 and profile['SSID' .. bssid] then
+                            local label, kind = security(profile, bssid)
+                            local key = kind == 'WPA' and (profile['WPAPSK' .. bssid] or token(profile.WPAPSK, bssid)) or nil
+                            connections[#connections+1] = {ssid=profile['SSID' .. bssid], ifname=ifname,
+                                security=label, type=kind, key=key, hidden=token(profile.HideSSID, bssid) == '1',
+                                band=band, width=width(profile, band)}
+                        end
+                    end
+                else
+                local net = {ifname=name, label=band .. ' (' .. name .. ')', ssid=profile.SSID1 or name,
+                    encryption=security(profile, 1), up=flags%2 == 1, stations={}}
+                networks[#networks+1] = net
+                if net.up then
+                    local output = native('status', name)
+                    local direct = output and station_rows(output)
+                    if direct then
+                        net.stations = direct
+                        net.disconnect_supported = true
+                    else
+                    local read, list = pcall(c_StaInfo, name)
+                    if not read or type(list) ~= 'table' then
+                        errors[#errors+1] = name .. ': station data unavailable'
+                    else
+                        local macs = {}
+                        -- Vendor tables are zero-indexed and can be sparse; ipairs loses clients.
+                        for _, station in pairs(list) do
+                            local mac = type(station) == 'table' and station.MacAddr
+                            if type(mac) == 'string' and mac:match('^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$') then
+                                mac = mac:upper()
+                                if not macs[mac] then
+                                    macs[mac] = true
+                                    local signal
+                                    for antenna=0,3 do
+                                        local rssi = tonumber(station['AvgRssi' .. antenna])
+                                        -- The vendor ABI also returns zero/positive placeholders.
+                                        if rssi and rssi >= -120 and rssi < 0 then signal = math.max(signal or -120, rssi) end
+                                    end
+                                    -- Do not infer Mbps/NSS from the vendor's packed MCS fields.
+                                    net.stations[#net.stations+1] = {mac=mac, signal=signal}
+                                end
+                            end
+                        end
+                        table.sort(net.stations, function(a,b) return a.mac < b.mac end)
+                    end
+                    end
+                end
+                end
+            end
+        end
+    end
+end
+if action == 'disconnect' then fail('Unknown Wi-Fi radio.') end
+if action == 'connections' then emit({connections=connections, error=#errors > 0 and table.concat(errors, '; ') or nil}); return end
+if #networks == 0 then fail('No MediaTek radios were found.') end
+emit({networks=networks, error=#errors > 0 and table.concat(errors, '; ') or nil})

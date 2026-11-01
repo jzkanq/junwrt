@@ -1,0 +1,16 @@
+{
+  "luci-app-junwrt-wifi-status": {
+    "description": "Read Wi-Fi stations and request individual client disconnection",
+    "read": {
+      "ubus": { "file": ["exec"] },
+      "file": { "/usr/bin/junwrt-wifi-status status": ["exec"] }
+    },
+    "write": {
+      "ubus": { "file": ["exec"] },
+      "file": {
+        "/usr/bin/junwrt-wifi-status connections": ["exec"],
+        "/usr/bin/junwrt-wifi-status disconnect *": ["exec"]
+      }
+    }
+  }
+}

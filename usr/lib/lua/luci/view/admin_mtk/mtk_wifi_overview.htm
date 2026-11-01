@@ -1,0 +1,737 @@
+<%+header%>
+<!--
+    This module is a demo to configure MTK' proprietary WiFi driver.
+    Basic idea is to bypass uci and edit wireless profile (mt76xx.dat) directly.
+    LuCI's WiFi configuration is more logical and elegent, but it's quite tricky to 
+    translate uci into MTK's WiFi profile (like we did in "uci2dat").
+
+    Hua Shao <nossiac@163.com>
+-->
+
+<script src="/luci-static/resources/monCon.js"></script>
+
+<%
+local mtkwifi = require("mtkwifi")
+local devs = mtkwifi.get_all_devs()
+local l1dat, l1 = mtkwifi.__get_l1dat()
+local dridx = l1.DEV_RINDEX
+local main_ifname
+local map_cfgs
+local first_card_cfgs
+local appliedMapModeDiff
+local chipname
+if pcall(require, "map_helper") then
+    map_cfgs = mtkwifi.load_profile(mtkwifi.__read_easymesh_profile_path())
+    first_card_cfgs = mtkwifi.load_profile(mtkwifi.detect_first_card())
+    local appliedMapDiffTable = mtkwifi.diff_profile(mtkwifi.detect_first_card())
+    appliedMapModeDiff = appliedMapDiffTable["MapMode"] and appliedMapDiffTable["MapMode"][2] or nil
+end
+%>
+
+
+<link rel="stylesheet" href="<%=resource%>/view/network/junwrt-wifi-v3.css">
+<div class="junwrt-wifi-page">
+  <div class="wifi-page-header">
+    <div><h2 class="wifi-page-title"><a name="content"><%:Wi-Fi settings%></a></h2>
+    <p class="wifi-page-intro"><%:Manage the name, password and security of your wireless networks.%></p></div>
+  </div>
+  <% if #devs == 0 then %><div class="wifi-empty"><%:No wireless device found!%></div><% end %>
+  <div class="wifi-band-grid">
+  <% for _,dev in ipairs(devs) do %>
+    <% main_ifname = l1dat and l1dat[dridx][dev.devname].main_ifname or dbdc_prefix[mainidx][subidx].."0" %>
+    <% if mtkwifi.exists("/sys/class/net/"..main_ifname) then %>
+      <%
+      local device_band = dev.dbdcBandName or mtkwifi.band(dev.WirelessMode)
+      local is_5g = device_band == "5G"
+      local diff = mtkwifi.diff_profile(dev.profile)
+      local quick_bw = dev.__bw or (is_5g and "80" or "40")
+      local quick_power = tonumber(dev.TxPower) or 100
+      if quick_power < 1 or quick_power > 100 then quick_power = 100 end
+      %>
+      <section class="wifi-card" data-band="<%=is_5g and '5g' or '2g'%>">
+        <div class="wifi-card-header">
+          <span class="wifi-band-icon"><svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 8.5a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M8.5 15.5a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="19" r="1" fill="currentColor" stroke="none"/></svg></span>
+          <div><h3 class="wifi-card-heading"><%=is_5g and '5 GHz' or '2.4 GHz'%></h3>
+          <p class="wifi-band-help"><% if is_5g then %><%:Fast connections nearby%><% else %><%:Longer range and smart devices%><% end %></p></div>
+          <% if next(diff) ~= nil then %><span class="wifi-change-state"><%:Changes pending%></span><% end %>
+          <% if not dev.vifs then %><span class="wifi-error-state"><%:Invalid radio profile%></span><% end %>
+        </div>
+        <div class="wifi-primary-box">
+        <% if dev.vifs then %>
+          <% for vif_number,vif in ipairs(dev.vifs) do %>
+            <% if vif_number == 2 then %><details class="wifi-additional"><summary><%:Additional networks%> (<%=#dev.vifs-1%>)</summary><div><% end %>
+            <%
+            local quick_ssid = tostring(vif.__ssid or ""):gsub("&", "&amp;"):gsub("\"", "&quot;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+            local quick_security_names = {OPEN="Open (no password)", WPA2PSK="WPA2 Personal", WPA3PSK="WPA3 Personal", WPA2PSKWPA3PSK="WPA2/WPA3 Personal", WPAPSKWPA2PSK="WPA/WPA2 Personal", WPA1PSKWPA2PSK="WPA/WPA2 Personal"}
+            local quick_security_name = quick_security_names[vif.__authmode] or "Configured security"
+            local quick_personal_modes = {WPAPSK=true, WPA2PSK=true, WPAPSKWPA2PSK=true, WPA1PSKWPA2PSK=true, WPA3PSK=true, WPA2PSKWPA3PSK=true, SAE=true, WPA2PSKSAE=true}
+            %>
+            <div class="wifi-vif-container">
+              <div class="wifi-vif-header">
+                                    <div class="wifi-vif-identity">
+                                        <% if vif.state == "up" then %>
+                                            <span class="wifi-pill-badge pill-active">Active (UP)</span>
+                                        <% else %>
+                                            <span class="wifi-pill-badge pill-disabled">Disabled</span>
+                                        <% end %>
+                                        <div class="wifi-ssid-label">
+                                            <span id="SSID_<%=vif.vifname%>">
+                                                <% if vif.__ssid == "" then %>
+                                                    <span style="color: #e11d48;"><%:Error: value not present in dat file%></span>
+                                                <% else %>
+                                                    <%=quick_ssid:gsub(" ", "&nbsp;")%>
+                                                <% end %>
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    <!-- VIF Actions -->
+                                    <div>
+                                        <div id="ActionBtns_<%=vif.vifname%>" class="wifi-vif-actions">
+                                            <% if not vif.state then %>
+                                                <input class="cbi-button cbi-button-apply" title="Enable this network" value="Enable" type="button" onclick="alert('Please click on Reload button of ' + '<%=dev.devname%>' + ' device to enable this interface.')">
+                                            <% elseif vif.state == "up" then %>
+                                                <input class="cbi-button cbi-button-reset" title="Disable this network" value="Disable" type="button" onclick="visit_url('<%=vif.vifname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_disable", vif.vifname)%>')">
+                                            <% else %>
+                                                <input class="cbi-button cbi-button-apply" title="Enable this network" value="Enable" type="button" onclick="visit_url('<%=vif.vifname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_enable", vif.vifname)%>')">
+                                            <% end %>
+                                            <details class="wifi-network-tools"><summary>More</summary><div class="wifi-menu-panel"><input class="cbi-button cbi-button-edit" title="Edit this network" value="<%:Edit%>" type="button" onclick="visit_url('<%=vif.vifname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_cfg_view", dev.devname, vif.vifname)%>')">
+                                            <input class="cbi-button cbi-button-remove" title="Delete this network" value="<%:Remove%>" type="button" onclick="visit_url('<%=vif.vifname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_del", dev.devname, vif.vifname)%>')">
+                                        <details class="wifi-advanced-details">
+                                    <summary><%:Technical details%></summary>
+                                    <div class="wifi-advanced-content">
+                                <div class="wifi-grid-specs">
+                                    <div class="wifi-spec-col">
+                                        <span class="wifi-spec-lbl">Interface</span>
+                                        <span class="wifi-spec-val"><%=vif.vifname%></span>
+                                    </div>
+                                    <div class="wifi-spec-col">
+                                        <span class="wifi-spec-lbl">Type</span>
+                                        <span class="wifi-spec-val">Access Point</span>
+                                    </div>
+                                    <div class="wifi-spec-col">
+                                        <span class="wifi-spec-lbl">Channel</span>
+                                        <span class="wifi-spec-val" id="CHANNEL_<%=vif.vifname%>"><%=vif.__channel or dev.Channel%></span>
+                                    </div>
+                                    <div class="wifi-spec-col">
+                                        <span class="wifi-spec-lbl">BSSID (MAC)</span>
+                                        <span class="wifi-spec-val">
+                                            <% if vif.state == "up" then %>
+                                                <span id="BSSID_<%=vif.vifname%>"><%=vif.__bssid%></span>
+                                            <% else %>
+                                                <span id="BSSID_<%=vif.vifname%>" style="color: #94a3b8;"><%:Offline%></span>
+                                            <% end %>
+                                        </span>
+                                    </div>
+                                    <div class="wifi-spec-col">
+                                        <span class="wifi-spec-lbl">Standard / Mode</span>
+                                        <span class="wifi-spec-val">
+                                            <% if vif.state == "up" then %>
+                                                <%=dev.WirelessModeList[tonumber(vif.__wirelessmode)] or "802.11ax"%>
+                                            <% else %>
+                                                <span style="color: #94a3b8;"><%:Disabled%></span>
+                                            <% end %>
+                                        </span>
+                                    </div>
+                                </div>
+                                    </div>
+                                </details></div></details></div>
+                                        <div id="BusyText_<%=vif.vifname%>" class="busy-text" style="display:none">
+                                            <img src="<%=resource%>/icons/loading.gif" width="16" height="16" alt="Busy" style="vertical-align: middle;"> <%:Processing...%>
+                                        </div>
+                                    </div>
+                                </div>
+              <div class="wifi-quick-panel wifi-vif-quick"><form method="post" class="wifi-quick-form" data-password-editable="<%=quick_personal_modes[vif.__authmode] and '1' or '0'%>" action="<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "quick_vif_cfg", dev.devname, vif.vifname)%>" onsubmit="return validateQuickWifiForm(this)">
+                                        <input type="hidden" name="token" value="<%=token%>">
+                                        <input type="hidden" name="__apply" value="1">
+                                        <div class="wifi-quick-grid">
+                                            <div class="wifi-quick-field">
+                                                <label for="wifi-ssid-<%=vif.vifname%>"><%:Wi-Fi name (SSID)%></label>
+                                                <input id="wifi-ssid-<%=vif.vifname%>" name="SSID" value="<%=quick_ssid%>" maxlength="32" autocomplete="off" required>
+                                            </div>
+                                            <div class="wifi-quick-field">
+                                                <label for="wifi-security-<%=vif.vifname%>"><%:Security%></label>
+                                                <select id="wifi-security-<%=vif.vifname%>" name="__quick_security" onchange="updateQuickWifiPasswordState(this.form)">
+                                                    <option value="keep" selected="selected"><%=quick_security_name%> (<%:current%>)</option>
+                                                    <option value="WPA2PSKWPA3PSK"><%:WPA2/WPA3 Personal (recommended)%></option>
+                                                    <option value="WPA2PSK"><%:WPA2 Personal%></option>
+                                                    <option value="WPA3PSK"><%:WPA3 Personal%></option>
+                                                    <option value="Disable"><%:Open network (no password)%></option>
+                                                </select>
+                                            </div>
+                                            <div class="wifi-quick-field">
+                                                <label for="wifi-password-<%=vif.vifname%>"><%:Wi-Fi password%></label>
+                                                <div class="wifi-password-row">
+                                                    <input id="wifi-password-<%=vif.vifname%>" name="WPAPSK" type="password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="Leave blank to keep current">
+                                                    <button type="button" class="wifi-password-toggle" onclick="toggleWifiPassword('<%=vif.vifname%>')"><%:Show%></button>
+                                                </div>
+                                                <small class="wifi-field-help wifi-password-help" data-keep-message="<%:Leave blank to keep your current password.%>" data-change-message="<%:Choose a new password when changing security.%>" data-open-message="<%:No password is used for an open network.%>"><%:Leave blank to keep your current password.%></small>
+                                            </div>
+                                        </div>
+                                        <div class="wifi-quick-actions">
+                                            <span class="wifi-quick-note"><%:Devices reconnect briefly after saving.%></span>
+                                            <div class="wifi-quick-action-group">
+                                                <button type="submit" class="wifi-quick-primary" data-applying="<%:Applying...%>"><%:Save changes%></button>
+                                            </div>
+                                        </div>
+                                    </form></div>
+            </div>
+          <% end %>
+          <% if #dev.vifs > 1 then %></div></details><% end %>
+        <% end %>
+        </div>
+        <details class="wifi-radio-more" <% if not dev.vifs then %>open<% end %>>
+          <summary><span><%:Advanced settings%></span><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <div class="wifi-more-body">
+            <div class="wifi-quick-panel wifi-radio-quick">
+                    <div class="wifi-quick-panel-header">
+                        <div>
+                            <h4 class="wifi-quick-title"><%:Radio settings%></h4>
+                            <p class="wifi-quick-help"><%:Set channel width and transmit power.%></p>
+                        </div>
+                        <span class="wifi-quick-note"><%:Changes briefly reload Wi-Fi%></span>
+                    </div>
+                    <form method="post" class="wifi-quick-form" action="<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "quick_dev_cfg", dev.devname)%>" onsubmit="return validateQuickRadioForm(this)">
+                        <input type="hidden" name="token" value="<%=token%>">
+                        <input type="hidden" name="__apply" value="1">
+                        <div class="wifi-quick-grid">
+                            <div class="wifi-quick-field">
+                                <label for="wifi-width-<%=dev.devname%>"><%:Channel width%></label>
+                                <select id="wifi-width-<%=dev.devname%>" name="__bw">
+                                    <option value="20" <% if quick_bw == "20" then %>selected="selected"<% end %>>20 MHz</option>
+                                    <option value="40" <% if quick_bw == "40" then %>selected="selected"<% end %>>40 MHz</option>
+                                    <% if not is_5g then %>
+                                        <option value="60" <% if quick_bw == "60" then %>selected="selected"<% end %>>20/40 MHz (automatic)</option>
+                                    <% else %>
+                                        <option value="80" <% if quick_bw == "80" then %>selected="selected"<% end %>>80 MHz</option>
+                                    <% end %>
+                                </select>
+                            </div>
+                            <div class="wifi-quick-field">
+                                <label for="wifi-power-<%=dev.devname%>"><%:Transmit power%></label>
+                                <select id="wifi-power-<%=dev.devname%>" name="TxPower">
+                                    <option value="25" <% if quick_power == 25 then %>selected="selected"<% end %>>25% · Low</option>
+                                    <option value="50" <% if quick_power == 50 then %>selected="selected"<% end %>>50% · Balanced</option>
+                                    <option value="75" <% if quick_power == 75 then %>selected="selected"<% end %>>75% · Strong</option>
+                                    <option value="100" <% if quick_power == 100 then %>selected="selected"<% end %>>100% · Maximum</option>
+                                    <% if quick_power ~= 25 and quick_power ~= 50 and quick_power ~= 75 and quick_power ~= 100 then %>
+                                        <option value="<%=quick_power%>" selected="selected"><%=quick_power%>% · Current</option>
+                                    <% end %>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="wifi-quick-actions">
+                            <span class="wifi-quick-note"><% if is_5g then %><%:80 MHz is recommended for this Wi-Fi 6 radio.%><% else %><%:20/40 MHz automatic is a good default for 2.4 GHz.%><% end %></span>
+                            <div class="wifi-quick-action-group">
+                                <button type="submit" class="wifi-quick-primary" data-applying="<%:Applying...%>"><%:Apply radio settings%></button>
+                            <a class="wifi-advanced-link" href="<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "dev_cfg_view", dev.devname)%>"><%:Advanced settings%> <span aria-hidden="true">→</span></a>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            <div class="wifi-device-info"><span><%=dev.devname%></span><span><%:Driver%> <%=dev.version%></span><span><% if dev.ApCliEnable == "1" then %><%:Repeater mode%><% else %><%:Access point mode%><% end %></span></div>
+            <div class="wifi-chip-controls">
+                        <div id="ActionBtns_<%=string.split(dev.devname,".")[1]%>" class="wifi-hardware-actions">
+                            <input class="cbi-button cbi-button-edit" title="Open WiFi hardware settings" value="<%:Hardware settings%>" type="button" onclick="visit_url('<%=string.split(dev.devname,".")[1]%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "chip_cfg_view", dev.devname)%>')">
+                        </div>
+                        <div id="BusyText_<%=string.split(dev.devname,".")[1]%>" class="busy-text" style="display:none">
+                            <img src="<%=resource%>/icons/loading.gif" width="16" height="16" alt="Busy" style="vertical-align: middle;"> <%:Processing...%>
+                        </div>
+
+                        <div id="ActionBtns_<%=dev.devname%>" class="wifi-radio-actions">
+                            <% if not dev.vifs then %>
+                                <input class="cbi-button cbi-button-apply" id="reset" value="Restore Defaults" type="button" onclick="visit_url('<%=dev.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "reset_to_defaults", dev.devname)%>')">
+                            <% else %>
+                                <input class="cbi-button cbi-button-reload" title="Apply pending WiFi changes" value="<%:Apply and reload%>" type="button" onclick="visit_url('<%=dev.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "reload", dev.devname)%>')">
+                                <input class="cbi-button cbi-button-edit" title="Open radio settings" value="<%:Radio settings%>" type="button" onclick="visit_url('<%=dev.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "dev_cfg_view", dev.devname)%>')">
+                                <input class="cbi-button cbi-button-add" title="Add another WiFi network" value="<%:Add WiFi network%>" type="button" onclick='add_vif("<%=dev.devname%>","<%=dev.vifs.__prefix%>","<%=dev.maxVif%>")'>
+                            <% end %>
+                        </div>
+                        <div id="BusyText_<%=dev.devname%>" class="busy-text" style="display:none">
+                            <img src="<%=resource%>/icons/loading.gif" width="16" height="16" alt="Busy" style="vertical-align: middle;"> <%:Processing...%>
+                        </div>
+                    </div>
+            <% if dev.vifs and dev.apcli then %><div class="wifi-sta-subcard">
+                                <div class="wifi-sta-header">
+                                    <div class="wifi-sta-title-group">
+                                        <span class="wifi-pill-badge pill-sta">Repeater</span>
+                                        <span class="wifi-sta-interface"><%=dev.apcli.devname%></span>
+                                        <span class="wifi-sta-state">
+                                            Status: <strong id="ConnStatus_<%=dev.apcli.devname%>"><% if dev.ApCliEnable ~= "1" then %> <%:Disconnected%> <% end %></strong>
+                                        </span>
+                                    </div>
+
+                                    <!-- Action Buttons for apcli -->
+                                    <div>
+                                        <div id="ActionBtns_<%=dev.apcli.devname%>" style="display: inline-block;">
+                                            <% if dev.ApCliEnable ~= "1" then %>
+                                                <% if dev.apcli.state == "up" then %>
+                                                    <input class="cbi-button cbi-button-reset" style="width:90px" title="Disable this network" value="Disable" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_disable", dev.apcli.vifname)%>')">
+                                                <% else %>
+                                                    <input class="cbi-button cbi-button-apply" style="width:90px" title="Enable this network" value="Enable" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_enable", dev.apcli.vifname)%>')">
+                                                <% end %>
+                                                <input class="cbi-button cbi-button-reload" style="width:90px" title="Connect WiFi network" value="<%:Connect%>" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "apcli_connect", dev.devname, dev.apcli.vifname)%>')">
+                                                <input class="cbi-button cbi-button-edit" style="width:90px" title="Open repeater settings" value="<%:Repeater settings%>" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "apcli_cfg_view", dev.devname, dev.apcli.vifname)%>')">
+                                            <% else %>
+                                                <input class="cbi-button cbi-button-reset" id="ApCliDownBtn_<%=dev.apcli.devname%>" style="width:90px;display:none" title="Disable this network" value="Disable" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_disable", dev.apcli.vifname)%>')">
+                                                <input class="cbi-button cbi-button-apply" id="ApCliUpBtn_<%=dev.apcli.devname%>" style="width:90px;display:none" title="Enable this network" value="Enable" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_enable", dev.apcli.vifname)%>')">
+                                                <input class="cbi-button cbi-button-remove" id="ApCliDisConnBtn_<%=dev.apcli.devname%>" style="width:90px;display:none" title="Disconnect WiFi network" value="<%:Disconnect%>" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "apcli_disconnect", dev.devname, dev.apcli.vifname)%>')">
+                                                <input class="cbi-button cbi-button-reload" id="ApCliConnBtn_<%=dev.apcli.devname%>" style="width:90px;display:none" title="Connect WiFi network" value="<%:Connect%>" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "apcli_connect", dev.devname, dev.apcli.vifname)%>')">
+                                                <input class="cbi-button cbi-button-edit" id="ApCliCfgBtn_<%=dev.apcli.devname%>" style="width:90px;display:none" title="Open repeater settings" value="<%:Repeater settings%>" type="button" onclick="visit_url('<%=dev.apcli.devname%>','<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "apcli_cfg_view", dev.devname, dev.apcli.vifname)%>')">
+                                            <% end %>
+                                        </div>
+                                        <div id="BusyText_<%=dev.apcli.devname%>" class="busy-text" style="display:none">
+                                            <img src="<%=resource%>/icons/loading.gif" width="16" height="16" alt="Busy" style="vertical-align: middle;"> <%:Processing...%>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="wifi-sta-body" style="margin-top: 10px; font-size: 12px; color: #64748b;">
+                                    <div id="LoadingBar_<%=dev.apcli.devname%>" <% if dev.ApCliEnable ~= "1" then %> style="display:none" <% end %>>
+                                        <img src="<%=resource%>/icons/loading.gif" alt="<%:Loading%>" style="width:16px;height:16px;vertical-align:middle;"/> <cite>&nbsp;<%:Loading connection information of%> <%=dev.apcli.devname%></cite>
+                                    </div>
+                                    <div id="ConnInfo_<%=dev.apcli.devname%>" style="display:none; background: var(--jw-bg-elevated); padding: 8px 12px; border-radius: 6px; border: 1px solid #e2e8f0; margin-top: 6px;">
+                                        <strong><%:BSSID:%></strong> <span id="ApCliBssid_<%=dev.apcli.devname%>" style="font-family: monospace;"></span> &nbsp;|&nbsp;
+                                        <strong><%:SSID:%></strong> <span id="ApCliSsid_<%=dev.apcli.devname%>" style="font-family: monospace;"></span>
+                                    </div>
+                                    <span id="DisConnMsg_<%=dev.apcli.devname%>" <% if dev.ApCliEnable == "1" then %> style="display:none" <% end %>><%:Wireless repeater is currently disconnected or inactive.%></span>
+                                </div>
+                            </div><% end %>
+          </div>
+        </details>
+      </section>
+    <% end %>
+  <% end %>
+  </div>
+  <p class="wifi-page-note"><%:Each band saves separately. Leave the password blank to keep your current one.%></p>
+</div>
+<script>
+    var i18nConnected = '<%:Connected%>';
+    var i18nDisconnected = '<%:Disconnected%>';
+
+    function startQuickFormSubmit(form)
+    {
+        if (form._junwrtSaving) {
+            return false;
+        }
+        form._junwrtSaving = true;
+        form.setAttribute('aria-busy', 'true');
+        var buttons = form.querySelectorAll('button[type="submit"], input[type="submit"]');
+        for (var i = 0; i < buttons.length; i++) {
+            buttons[i].disabled = true;
+            if (buttons[i].tagName === 'BUTTON' && buttons[i].getAttribute('data-applying')) {
+                buttons[i].textContent = buttons[i].getAttribute('data-applying');
+            }
+        }
+        return true;
+    }
+
+    function validateQuickRadioForm(form)
+    {
+        var power = parseInt(form.querySelector('[name="TxPower"]').value, 10);
+        if (isNaN(power) || power < 1 || power > 100) {
+            alert('Transmit power must be between 1 and 100 percent.');
+            return false;
+        }
+        return startQuickFormSubmit(form);
+    }
+
+    function updateQuickWifiPasswordState(form)
+    {
+        var security = form.querySelector('[name="__quick_security"]');
+        var password = form.querySelector('[name="WPAPSK"]');
+        var showButton = form.querySelector('.wifi-password-toggle');
+        var unchanged = security && security.value === 'keep';
+        var openNetwork = security && security.value === 'Disable';
+        var unsupportedCurrent = unchanged && form.getAttribute('data-password-editable') !== '1';
+        if (password) {
+            password.required = !unchanged && !openNetwork;
+            password.disabled = unsupportedCurrent || openNetwork;
+            password.placeholder = unchanged ? 'New password (optional)' : openNetwork ? 'Not used for an open network' : 'Enter a new password (8–63 characters)';
+        }
+        var help = form.querySelector('.wifi-password-help');
+        if (help) {
+            help.textContent = unsupportedCurrent ? 'Use advanced settings for this security mode.' : unchanged ? help.getAttribute('data-keep-message') : openNetwork ? help.getAttribute('data-open-message') : help.getAttribute('data-change-message');
+        }
+        if (showButton) {
+            showButton.disabled = unsupportedCurrent || openNetwork;
+        }
+    }
+
+    function validateQuickWifiForm(form)
+    {
+        var ssid = form.querySelector('[name="SSID"]');
+        var security = form.querySelector('[name="__quick_security"]');
+        var password = form.querySelector('[name="WPAPSK"]');
+        if (!ssid || ssid.value.length < 1 || ssid.value.length > 32) {
+            alert('Wi-Fi name must be 1 to 32 characters.');
+            return false;
+        }
+        if (security.value !== 'Disable' && password && !password.disabled && (security.value !== 'keep' || password.value.length > 0) && (password.value.length < 8 || password.value.length > 63)) {
+            alert('Wi-Fi password must be 8 to 63 characters.');
+            return false;
+        }
+        if (security.value === 'Disable' && !window.confirm('This removes the Wi-Fi password. Anyone nearby will be able to connect. Continue?')) {
+            return false;
+        }
+        return startQuickFormSubmit(form);
+    }
+
+    function toggleWifiPassword(vifName)
+    {
+        var password = document.getElementById('wifi-password-' + vifName);
+        var button = password && password.parentNode.querySelector('.wifi-password-toggle');
+        if (!password || !button || password.disabled) {
+            return;
+        }
+        if (password.type === 'password') {
+            password.type = 'text';
+            button.textContent = 'Hide';
+        } else {
+            password.type = 'password';
+            button.textContent = 'Show';
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        var quickForms = document.querySelectorAll('.wifi-vif-quick .wifi-quick-form');
+        for (var i = 0; i < quickForms.length; i++) {
+            updateQuickWifiPasswordState(quickForms[i]);
+        }
+    });
+
+    function translateConnState(state)
+    {
+        if(state == "Connected"){
+            return i18nConnected;
+        }
+        if(state == "Disconnected"){
+            return i18nDisconnected;
+        }
+        return state;
+    }
+
+    function disable_all_buttons()
+    {
+        var inp = document.getElementsByTagName("INPUT");
+        for(var idx=0; idx < inp.length; idx++){
+            inp[idx].disabled = true;
+        }
+    }
+
+    function enable_all_buttons()
+    {
+        var inp = document.getElementsByTagName("INPUT");
+        for(var idx=0; idx < inp.length; idx++){
+            inp[idx].disabled = false;
+        }
+    }
+
+    function visit_url(idSuffix,to)
+    {
+        disable_all_buttons();
+        document.getElementById("ActionBtns_"+idSuffix).style.display = "none";
+        document.getElementById("BusyText_"+idSuffix).style.display = "";
+        location.href = to;
+    }
+
+    function add_vif(devName, vifPrefix, maxVif)
+    {
+        disable_all_buttons();
+        document.getElementById("ActionBtns_"+devName).style.display = "none";
+        document.getElementById("BusyText_"+devName).style.display = "";
+        if(isNaN(maxVif) || !/^\d{1,}$/.test(maxVif)){
+            alert("Failed to add a new interface!\nERROR: Incorrect maximum supported VIF setting!\nmaxVif = " + maxVif);
+            location.reload(true);
+            return;
+        }
+        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "get_bssid_num")%>/' + devName, null,
+            function(x)
+            {
+                try{
+                    var resp = JSON.parse(x.response);
+                    if(resp["status"] == "SUCCESS"){
+                        if(isNaN(resp["bssidNum"]) || !/^\d{1,}$/.test(resp["bssidNum"]) || parseInt(resp["bssidNum"]) > parseInt(maxVif)){
+                            alert("Failed to add a new interface!\nERROR: Device settings have been corrupted!\nBssidNum in Response is: " + resp["bssidNum"]);
+                            location.reload(true);
+                        }
+                        else if(parseInt(resp["bssidNum"]) == parseInt(maxVif)){
+                            alert("As the Device " + devName + " supports maximum " + maxVif + " virtual interfaces, no more virtual interfaces can be added!");
+                        }
+                        else{
+                            location.href = '<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "vif_add_view")%>/' + devName + '/' + vifPrefix;
+                        }
+                    }
+                    else{
+                        alert("Failed to add a new interface!\nERROR: " + resp["status"]);
+                    }
+                }
+                catch(e){
+                    alert("Failed to add a new interface!\nERROR: Incorrect response received!");
+                    console.log("Failed to add a new interface!\nERROR: [" + e.name + "] " + e.message);
+                }
+                finally{
+                    enable_all_buttons();
+                    document.getElementById("ActionBtns_"+devName).style.display = "";
+                    document.getElementById("BusyText_"+devName).style.display = "none";
+                }
+            }
+        );
+    }
+
+    function apcliInfoTimerHandler(vifNameList,idx,remSec)
+    {
+        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "get_apcli_conn_info")%>/' + vifNameList[idx], null,
+            function(x)
+            {
+                try{
+                    updateApCliInfoCb(vifNameList,idx,remSec,JSON.parse(x.response));
+                }
+                catch(e){
+                    var y={conn_state:"Disconnected"};
+                    updateApCliInfoCb(vifNameList,idx,0,y);
+                }
+            }
+        );
+    }
+    function updateApCliInfoCb(vifNameList,idx,remSec,connInfo)
+    {
+        var vifName = vifNameList[idx];
+        if(connInfo.hasOwnProperty("conn_state") && connInfo["conn_state"] == "Connected"){
+            document.getElementById("ConnStatus_"+vifName).innerHTML = translateConnState(connInfo["conn_state"]);
+            document.getElementById("ApCliBssid_"+vifName).innerHTML = (connInfo.hasOwnProperty("bssid")) ? connInfo["bssid"] : "?";
+            document.getElementById("ApCliSsid_"+vifName).innerHTML = (connInfo.hasOwnProperty("ssid")) ? connInfo["ssid"].replace(/ /g,"&nbsp;") : "";
+            document.getElementById("LoadingBar_"+vifName).style.display = "none";
+            document.getElementById("ApCliDownBtn_"+vifName).style.display = "";
+            document.getElementById("ApCliDisConnBtn_"+vifName).style.display = "";
+            document.getElementById("ApCliCfgBtn_"+vifName).style.display = "";
+            document.getElementById("ConnInfo_"+vifName).style.display = "";
+            if(idx < vifNameList.length - 1){
+                setTimeout(apcliInfoTimerHandler,1000,vifNameList,idx+1,5);
+            }
+        }
+        else{
+            if(remSec > 1){
+                setTimeout(apcliInfoTimerHandler,1000,vifNameList,idx,remSec - 1);
+            }
+            else{
+                document.getElementById("ConnStatus_"+vifName).innerHTML = (connInfo.hasOwnProperty("conn_state")) ? translateConnState(connInfo["conn_state"]) : i18nDisconnected;
+                document.getElementById("LoadingBar_"+vifName).style.display = "none";
+                document.getElementById("DisConnMsg_"+vifName).style.display = "";
+                if (connInfo.hasOwnProperty("infc_state") && connInfo["infc_state"] == "up"){
+                    document.getElementById("ApCliDownBtn_"+vifName).style.display = "";
+                }
+                else{
+                    document.getElementById("ApCliUpBtn_"+vifName).style.display = "";
+                }
+                document.getElementById("ApCliConnBtn_"+vifName).style.display = "";
+                document.getElementById("ApCliCfgBtn_"+vifName).style.display = "";
+                if(idx < vifNameList.length - 1){
+                    setTimeout(apcliInfoTimerHandler,1000,vifNameList,idx+1,5);
+                }
+            }
+        }
+    }
+    function updateApCliInfo()
+    {
+        var apCliInfcList=[];
+        <% for _,dev in ipairs(devs) do %>
+            <% if dev.apcli and dev.ApCliEnable == "1" then %>
+                apCliInfcList.push("<%=dev.apcli.devname%>");
+            <% end %>
+        <% end %>
+        if (apCliInfcList.length >= 1 ){
+            setTimeout(apcliInfoTimerHandler,1000,apCliInfcList,0,5);
+        }
+    }
+
+    function update_displayed_profile_fields(obj_1905)
+    {
+        var vifInfcList=[];
+        var WirelessModeListJS = {};
+        <% for _,dev in ipairs(devs) do %>
+            <% if dev.vifs then%>
+                <% for _,vif in ipairs(dev.vifs) do %>
+                    <% if vif.state == "up" then%>
+                        vifInfcList.push("<%=vif.vifname%>");
+                        WirelessModeListJS['<%=vif.vifname%>'] = {};
+                        <% for wModeIdx, wModeStr in pairs(dev.WirelessModeList) do %>
+                            WirelessModeListJS['<%=vif.vifname%>']['<%=wModeIdx%>'] = "<%=wModeStr%>";
+                        <% end %>
+                    <% end %>
+                <% end %>
+            <% end %>
+        <% end %>
+
+        if(!obj_1905.hasOwnProperty('Radio Info')){
+            console.log("Topology does not have Radio Info Property!",obj_1905);
+            return;
+        }
+        for (var vifIdx = 0; vifIdx < vifInfcList.length; vifIdx++){
+            var ssid_span = document.getElementById("SSID_"+vifInfcList[vifIdx]);
+            var channel_span = document.getElementById("CHANNEL_"+vifInfcList[vifIdx]);
+            var bssid_span = document.getElementById("BSSID_"+vifInfcList[vifIdx]);
+
+            if (!ssid_span || !channel_span || !bssid_span ){
+                continue;
+            }
+            for (var radioIdx=0; radioIdx < obj_1905['Radio Info'].length; radioIdx++){
+                var radioInfoObj = obj_1905['Radio Info'][radioIdx];
+                var bssInfoArr = radioInfoObj['BSSINFO'];
+                var bssIdx;
+                for(bssIdx=0; bssIdx < bssInfoArr.length; bssIdx++){
+                    var bssInfo = bssInfoArr[bssIdx];
+                    if(bssInfo.hasOwnProperty('BSSID') && (bssInfo['BSSID'].toUpperCase() == bssid_span.innerHTML.toUpperCase())){
+                        ssid_span.innerHTML = bssInfo['SSID'];
+                        channel_span.innerHTML = radioInfoObj['channel'];
+                        break;
+                    }
+                }
+                if(bssIdx < bssInfoArr.length){
+                    break;
+                }
+            }
+        }
+    }
+
+    function find_own_topo_info(devRole, jsTopoInfo, alMac)
+    {
+        var tree_info = [];
+        var topoInfoArr = jsTopoInfo['topology information'];
+        if(!(topoInfoArr instanceof Array)){
+            console.log("Incorrect TopologyInfo: Value of topology information is not an Array!");
+            return;
+        }
+        for(var idx_1905=0; idx_1905 < topoInfoArr.length; idx_1905++){
+            var obj_1905 = topoInfoArr[idx_1905];
+            if (obj_1905.hasOwnProperty('AL MAC') && (obj_1905['AL MAC'].toUpperCase() == alMac.toUpperCase())){
+                update_displayed_profile_fields(obj_1905);
+                return;
+            }
+        }
+        console.log(alMac," AL-MAC NOT FOUND in Topology! Topology: ",jsTopoInfo);
+    }
+
+    function get_al_mac(devRole, jsTopoInfo)
+    {
+        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "multi_ap", "get_al_mac")%>' + '/' + devRole, null, 
+            function(x)
+            {
+                console.log(x);
+                try{
+                    var r = JSON.parse(x.response);
+                    var mac_reg_exp = /[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}:[A-Fa-f0-9]{2}/;
+                    if (r['status'] == "SUCCESS" && mac_reg_exp.test(r['al_mac'])) {
+                        find_own_topo_info(devRole, jsTopoInfo, r['al_mac']);
+                    }
+                    else{
+                        console.log("Incorrect AL-MAC received!",r['status'],r['al_mac']);
+                    }
+                }
+                catch(e){
+                    console.log("Incorrect response received for get AL-MAC request!",e.name,e.message);
+                }
+            }
+        );
+    }
+
+    function get_run_time_topology(devRole)
+    {
+        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "multi_ap", "get_runtime_topology")%>', null, 
+            function(x)
+            {
+                try{
+                    var r = JSON.parse(x.response);
+                    if(r.status == "SUCCESS"){
+                        var jsTopoInfo = JSON.parse(r['luaTopologyInfo']);
+                        get_al_mac(devRole, jsTopoInfo);
+                    }
+                    else{
+                        console.log("Failed to get Topology Info!\nStatus: ",r.status);
+                    }
+                }
+                catch(e){
+                    console.log("Incorrect response! Failed to get Topology Info!",e.name,e.message);
+                }
+            }
+        );
+    }
+
+    function get_device_role()
+    {
+        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "multi_ap", "get_device_role")%>', null, 
+            function(x)
+            {
+                console.log(x);
+                try{
+                    var devRoleObj = JSON.parse(x.response);
+                    var devRole = parseInt(devRoleObj.mapDevRole);
+                    if(devRole != 1 && devRole != 2){
+                        console.log("EasyMesh Device Role is neither Controller nor Agent!");
+                        return;
+                    }
+                    get_run_time_topology(devRole);
+                }
+                catch(e){
+                    console.log("Incorrect response received for get device role request!",e.name,e.message);
+                }
+            }
+        );
+    }
+
+    function check_update_easymesh_profile()
+    {
+        <% if not pcall(require, "map_helper") then %>
+            console.log("map_helper library is not available!");
+            return;
+        <% else %>
+            <%if not map_cfgs then %>
+                console.log("EasyMesh Configurations are not available!");
+                return;
+            <% else %>
+                <% if (not appliedMapModeDiff and first_card_cfgs.MapMode == "1") or
+                    (appliedMapModeDiff and appliedMapModeDiff == "1" and first_card_cfgs.MapMode ~= "1") then %>
+                    get_device_role();
+                <% end %>
+            <% end %>
+        <% end %>
+    }
+
+    function get_apply_status_cb(rsp)
+    {
+        try{
+            var r = JSON.parse(rsp);
+        }
+        catch(e){
+            return;
+        }
+        if(r.status == "ON_PROGRESS"){
+            var u = confirm("Device is applying the saved settings now!\n" +
+                "It is recommended to wait until all the saved settings are applied.\n" +
+                "Please click on 'OK' button to wait for the device.\n" +
+                "or click on 'Cancel' button to configure the settings available in current web-page.");
+            if (u == true) {
+                location = '<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "loading")%>' + window.location.pathname;
+            }
+        }
+    }
+
+    function get_apply_status()
+    {
+        XHR.get('<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "get_apply_status")%>', null,
+            function(x)
+            {
+                console.log(x);
+                get_apply_status_cb(x.response);
+            }
+        );
+    }
+
+    window.onload = function(){
+        MonCon.ping();
+        get_apply_status();
+        check_update_easymesh_profile();
+        updateApCliInfo();
+    }
+</script>
+    <%+footer%>

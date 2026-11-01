@@ -1,0 +1,105 @@
+#!/usr/bin/ruby
+# AW1000 vendor 7.4 station API, verified against the shipped mt_wifi.ko.
+# Core Ruby only: AArch64 socket syscall + IO#ioctl; no shell or runtime extensions.
+# GET_MAC_TABLE: 3008 bytes, uint64 count, 40-byte records; MAC at record+1.
+# Query OID 0x1981: 128 bytes, input MAC at 0, valid at 121, integer Mbps at 96/100.
+# These are the driver's computed rates, not estimates from packed MCS/capability data.
+module JunWrtWifiNative
+  TABLE_BYTES = 3008
+  RECORD_BYTES = 40
+  MAX_CLIENTS = 75
+  QUERY_STA = 0x1981
+
+  def self.valid_mac?(mac)
+    !!(mac.is_a?(String) && mac =~ /\A(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\z/ &&
+       mac.delete(':') != '000000000000' && mac[0,2].to_i(16).even?)
+  end
+
+  class Driver
+    def initialize(interface)
+      raise 'Unsupported platform' unless RUBY_PLATFORM.include?('aarch64') && ['x'].pack('p').bytesize == 8
+      raise 'Invalid interface' unless interface =~ /\Ara[inx]*[0-9]+\z/ && interface.bytesize < 16
+      @interface = interface
+      @io = IO.for_fd(syscall(198, 2, 2, 0)) # socket(AF_INET, SOCK_DGRAM, 0)
+    end
+
+    def ioctl(command, buffer, flags=0, length=buffer.bytesize)
+      # Keep buffer alive and fixed-size while its pointer is passed to the kernel.
+      request = @interface.ljust(16, "\0") + [buffer].pack('p') + [length, flags].pack('SS') + "\0"*4
+      @io.ioctl(command, request)
+      request.byteslice(24,2).unpack('S')[0]
+    end
+
+    def table
+      buffer = "\0".b * 65536
+      length = ioctl(0x8bef, buffer, 0, 65535)
+      raise 'Unrecognized station table layout' unless length == TABLE_BYTES
+      count = buffer.unpack('Q<')[0]
+      raise 'Invalid station count' unless count <= MAX_CLIENTS
+      result = []
+      count.times do |index|
+        offset = 8 + index*RECORD_BYTES
+        mac = buffer.byteslice(offset+1,6).unpack('C6').map { |b| '%02X' % b }.join(':')
+        next unless JunWrtWifiNative.valid_mac?(mac)
+        rssi = buffer.byteslice(offset+12,3).unpack('c3').select { |v| v >= -120 && v < 0 }.max
+        result << {mac:mac, signal:rssi}
+      end
+      result.uniq { |row| row[:mac] }
+    end
+
+    def rates(row)
+      buffer = [row[:mac].delete(':')].pack('H*') + "\0".b*122
+      length = ioctl(0x8be1, buffer, QUERY_STA) # query only, SET bit absent
+      return row unless length == 128 && buffer.getbyte(121) == 1
+      return row unless buffer.byteslice(0,6).unpack('H*')[0].upcase == row[:mac].delete(':')
+      tx, rx = buffer.byteslice(96,8).unpack('L<2')
+      row[:tx] = tx if tx > 0 && tx <= 10000
+      row[:rx] = rx if rx > 0 && rx <= 10000
+      signal = buffer.byteslice(20,2).unpack('s<')[0]
+      row[:signal] = signal if signal >= -120 && signal < 0
+      row
+    rescue SystemCallError
+      row # A per-client query failure must not hide an associated station.
+    end
+
+    def disconnect(mac)
+      raise 'Invalid unicast MAC' unless JunWrtWifiNative.valid_mac?(mac)
+      raise 'Device is no longer associated' unless table.any? { |row| row[:mac] == mac.upcase }
+      # The vendor treats FF:FF:FF:FF:FF:FF as disconnect-all. valid_mac? forbids it.
+      command = 'DisConnectSta=' + mac.upcase + "\0"
+      ioctl(0x8be2, command)
+      true
+    end
+
+    def close
+      @io.close
+    end
+  end
+
+  def self.run(args, output=$stdout, factory=Driver)
+    driver = nil
+    action, interface, mac = args
+    raise 'Invalid action arguments' unless (action == 'status' && args.length == 2) || (action == 'disconnect' && args.length == 3 && valid_mac?(mac))
+    raise 'Invalid interface' unless interface.is_a?(String) && interface =~ /\Ara[inx]*[0-9]+\z/ && interface.bytesize < 16
+    driver = factory.new(interface)
+    if action == 'status'
+      rows = driver.table.map { |row| driver.rates(row) }
+      output.puts 'OK'
+      rows.each { |row| output.puts [row[:mac],row[:signal] || '',row[:tx] || '',row[:rx] || ''].join("\t") }
+    else
+      driver.disconnect(mac)
+      output.puts 'OK'
+    end
+    0
+  rescue StandardError
+    output.puts 'ERROR' # Never print arbitrary kernel/argument data into RPC logs.
+    1
+  ensure
+    driver.close if driver
+  end
+end
+
+if __FILE__ == $0
+  GC.disable
+  exit JunWrtWifiNative.run(ARGV)
+end

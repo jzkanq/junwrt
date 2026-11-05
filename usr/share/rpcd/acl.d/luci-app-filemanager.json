@@ -1,0 +1,62 @@
+{
+	"luci-app-filemanager": {
+		"description": "Grant access to File Manager",
+		"write": {
+			"cgi-io": [ "upload", "download" ],
+			"ubus": {
+				"file": [ "*" ]
+			},
+			"file": {
+				"/*": [ "list" ],
+				"/bin/*": [ "list", "read", "write" ],
+				"/config/*": [ "list", "read", "write" ],
+				"/data/*": [ "list", "read", "write" ],
+				"/etc/*": [ "list", "read", "write" ],
+				"/fibocom/*": [ "list", "read", "write" ],
+				"/home/*": [ "list", "read", "write" ],
+				"/lib/*": [ "list", "read", "write" ],
+				"/lib64/*": [ "list", "read", "write" ],
+				"/mnt/*": [ "list", "read", "write" ],
+				"/opt/*": [ "list", "read", "write" ],
+				"/overlay/*": [ "list", "read", "write" ],
+				"/prebuilt/*": [ "list", "read", "write" ],
+				"/rom/*": [ "list", "read", "write" ],
+				"/root/*": [ "list", "read", "write" ],
+				"/sbin/*": [ "list", "read", "write" ],
+				"/system/*": [ "list", "read", "write" ],
+				"/tmp/*": [ "list", "read", "write" ],
+				"/usr/*": [ "list", "read", "write" ],
+				"/var/*": [ "list", "read", "write" ],
+				"/vendor/*": [ "list", "read", "write" ],
+				"/webs/*": [ "list", "read", "write" ],
+				"/www/*": [ "list", "read", "write" ],
+				"/bin/mkdir *": [ "exec" ],
+				"/bin/touch *": [ "exec" ],
+				"/bin/chmod *": [ "exec" ],
+				"/bin/chown *": [ "exec" ],
+				"/bin/mv *": [ "exec" ],
+				"/bin/cp * /bin/*": [ "exec" ],
+				"/bin/cp * /config/*": [ "exec" ],
+				"/bin/cp * /data/*": [ "exec" ],
+				"/bin/cp * /etc/*": [ "exec" ],
+				"/bin/cp * /fibocom/*": [ "exec" ],
+				"/bin/cp * /home/*": [ "exec" ],
+				"/bin/cp * /lib/*": [ "exec" ],
+				"/bin/cp * /lib64/*": [ "exec" ],
+				"/bin/cp * /mnt/*": [ "exec" ],
+				"/bin/cp * /opt/*": [ "exec" ],
+				"/bin/cp * /overlay/*": [ "exec" ],
+				"/bin/cp * /prebuilt/*": [ "exec" ],
+				"/bin/cp * /root/*": [ "exec" ],
+				"/bin/cp * /sbin/*": [ "exec" ],
+				"/bin/cp * /system/*": [ "exec" ],
+				"/bin/cp * /tmp/*": [ "exec" ],
+				"/bin/cp * /usr/*": [ "exec" ],
+				"/bin/cp * /var/*": [ "exec" ],
+				"/bin/cp * /vendor/*": [ "exec" ],
+				"/bin/cp * /webs/*": [ "exec" ],
+				"/bin/cp * /www/*": [ "exec" ]
+			}
+		}
+	}
+}

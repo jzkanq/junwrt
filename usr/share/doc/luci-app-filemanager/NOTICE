@@ -1,0 +1,9 @@
+LuCI File Manager (luci-app-filemanager)
+Author: Dmitry R and the OpenWrt LuCI contributors
+Source: https://github.com/openwrt/luci/tree/177cf48dca7760d111af61ceec586768c06aed63/applications/luci-app-filemanager
+License: Apache License 2.0, see the LICENSE file in this folder.
+
+Changed for JunWRT on 2026-11-05:
+- filemanager.js: a notification helper this LuCI does not have, Light and Dark follow JunWRT's switch, graphite Dark Mode colours, high-contrast buttons.
+- filemanager/HexEditor.js: the header colour in Dark Mode.
+- luci-app-filemanager.json (access list): leaves out /proc, /sys and /dev, because reading some files there can crash this router's kernel, and allows only the commands the page uses.

@@ -1,0 +1,15 @@
+{
+  "admin/modem/update": {
+    "title": "Updates",
+    "order": 54,
+    "action": {
+      "type": "view",
+      "path": "modem/update"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-update"
+      ]
+    }
+  }
+}

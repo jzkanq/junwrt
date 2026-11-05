@@ -1,0 +1,35 @@
+{
+  "luci-app-junwrt-update": {
+    "description": "Find a newer JunWRT WebUI and install it with one tap",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-update status": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-update check": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-update install": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-update save *": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

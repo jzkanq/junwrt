@@ -1,0 +1,274 @@
+#!/bin/sh
+# JunWRT updater: finds a newer WebUI installer through a signed manifest and runs it when asked.
+# It never flashes firmware, and it installs only on a request from the page or this command.
+
+# Fixed here, not read from the environment: this script can start a downloaded installer as root.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+ROOT=""
+MANIFEST_URL="https://raw.githubusercontent.com/jzkanq/junwrt/main/update.manifest"
+
+PUB_KEY="$ROOT/etc/junwrt_update_pub.pem"
+BUILD_FILE="$ROOT/etc/junwrt-webui.build"
+CONFIG=junwrt-update
+CONF_FILE="$ROOT/etc/config/$CONFIG"
+# Set while the installer runs: lets the owner finish an update that a failure or a power cut interrupted.
+INCOMPLETE="$ROOT/etc/junwrt-update.incomplete"
+# The rest lives in RAM, so daily checks never write to flash.
+RUN_DIR="$ROOT/var/run/junwrt-update"
+LATEST="$RUN_DIR/latest"       # signed part of the newest manifest seen
+CHECKED="$RUN_DIR/checked"     # time of the last check, then its error
+LOCK="$RUN_DIR/lock"
+STATE="$RUN_DIR/state"         # "<stage> <start time>" while an update runs
+RESULT="$RUN_DIR/result"       # "<done|current|failed> <time> <message>"
+WORKER="$RUN_DIR/worker"
+INSTALLER="$RUN_DIR/installer.sh"
+LOG="$RUN_DIR/log"
+MAX_MANIFEST=8192
+MAX_INSTALLER=16777216
+FIRST_CHECK=600
+CHECK_EVERY=86400
+RETRY_EVERY=3600
+
+die() {
+	printf '{"error":"%s"}\n' "$(clean "$1" 240)"
+	exit 1
+}
+
+clean() {
+	printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-"${2:-160}"
+}
+
+num() {
+	case "$1" in
+		''|*[!0-9]*) printf '0' ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+value() { # key file
+	sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n 1 | tr -d '\r'
+}
+
+ensure_run_dir() {
+	mkdir -p "$RUN_DIR" && chmod 0700 "$RUN_DIR"
+}
+
+is_running() {
+	[ -f "$LOCK" ] || return 1
+	command -v flock >/dev/null 2>&1 || return 1
+	flock -n "$LOCK" true 2>/dev/null && return 1
+	return 0
+}
+
+auto_on() {
+	[ "$(uci -q get "$CONFIG.main.auto" 2>/dev/null)" != 0 ]
+}
+
+installed_epoch() {
+	num "$(value epoch "$BUILD_FILE")"
+}
+
+update_available() {
+	local latest installed
+	[ -f "$LATEST" ] || return 1
+	latest="$(num "$(value epoch "$LATEST")")"
+	installed="$(installed_epoch)"
+	[ "$latest" -gt "$installed" ] && return 0
+	# Never offers an older build: an old signed manifest can be replayed, but it is never newer.
+	[ -f "$INCOMPLETE" ] && [ "$latest" -eq "$installed" ]
+}
+
+# curl checks the server first. A wrong clock or an old CA bundle must not block updates, and retrying
+# without that check is safe: only the signature and the signed hash decide what gets trusted.
+fetch() { # url file max_bytes seconds
+	local rc=0
+	curl -fsSL --connect-timeout 10 --max-time "$4" --max-filesize "$3" -o "$2" -- "$1" 2>/dev/null || rc=$?
+	case "$rc" in
+		35|51|58|60|77)
+			rc=0
+			curl -fsSLk --connect-timeout 10 --max-time "$4" --max-filesize "$3" -o "$2" -- "$1" 2>/dev/null || rc=$? ;;
+	esac
+	return "$rc"
+}
+
+# Leaves the signed part in <file>.body. Anything after the sig= line is ignored.
+verify() {
+	sed '/^sig=/,$d' "$1" > "$1.body" || return 1
+	sed -n 's/^sig=//p' "$1" | head -n 1 | base64 -d > "$1.sig" 2>/dev/null
+	[ -s "$1.body" ] && [ -s "$1.sig" ] || return 1
+	openssl dgst -sha256 -verify "$PUB_KEY" -signature "$1.sig" "$1.body" >/dev/null 2>&1
+}
+
+valid_body() {
+	local epoch sha size url
+	epoch="$(value epoch "$1")"
+	sha="$(value sha256 "$1")"
+	size="$(value size "$1")"
+	url="$(value url "$1")"
+	case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+	[ "${#epoch}" -le 12 ] || return 1
+	case "$sha" in *[!0-9a-f]*) return 1 ;; esac
+	[ "${#sha}" -eq 64 ] || return 1
+	case "$size" in ''|*[!0-9]*) return 1 ;; esac
+	[ "${#size}" -le 9 ] && [ "$size" -gt 0 ] && [ "$size" -le "$MAX_INSTALLER" ] || return 1
+	case "$url" in https://*) ;; *) return 1 ;; esac
+	case "$url" in *[!A-Za-z0-9._~:/?\&=%+-]*) return 1 ;; esac
+	return 0
+}
+
+# Sets CHECK_ERROR. A failed check keeps the last manifest that passed.
+check_now() {
+	local tmp="$RUN_DIR/check.$$"
+	CHECK_ERROR=""
+	ensure_run_dir || { CHECK_ERROR="Could not create the update folder."; return 1; }
+	if ! fetch "$MANIFEST_URL" "$tmp" "$MAX_MANIFEST" 20; then
+		CHECK_ERROR="Could not reach the update server. Check the internet connection and try again."
+	elif ! verify "$tmp"; then
+		CHECK_ERROR="The update information failed its signature check, so it was ignored."
+	elif ! valid_body "$tmp.body"; then
+		CHECK_ERROR="The update information is not valid, so it was ignored."
+	elif ! mv -f "$tmp.body" "$LATEST"; then
+		CHECK_ERROR="Could not save the update information."
+	fi
+	rm -f "$tmp" "$tmp.body" "$tmp.sig"
+	{ date +%s; printf '%s\n' "$CHECK_ERROR"; } > "$CHECKED"
+	[ -z "$CHECK_ERROR" ]
+}
+
+status() {
+	local state=idle stage="" started=0 finished=0 message="" latest=null available=false incomplete=false
+	local auto=0 checked=0 check_error=""
+	if is_running; then
+		state=running
+		[ -f "$STATE" ] && read -r stage started < "$STATE"
+		[ -n "$stage" ] || stage=starting
+	elif [ -s "$RESULT" ]; then
+		read -r state finished message < "$RESULT"
+	elif [ -f "$STATE" ]; then
+		state=failed
+		message="The update stopped before it finished. Try again."
+	fi
+	if [ -f "$LATEST" ]; then
+		latest="$(printf '{"epoch":%s,"built":"%s","notes":"%s","size":%s}' "$(num "$(value epoch "$LATEST")")" \
+			"$(clean "$(value built "$LATEST")" 40)" "$(clean "$(value notes "$LATEST")" 300)" "$(num "$(value size "$LATEST")")")"
+		update_available && available=true
+	fi
+	[ -f "$INCOMPLETE" ] && incomplete=true
+	auto_on && auto=1
+	if [ -f "$CHECKED" ]; then
+		checked="$(sed -n 1p "$CHECKED")"
+		check_error="$(sed -n 2p "$CHECKED")"
+	fi
+	printf '{"installed":{"epoch":%s,"built":"%s","source":"%s"},"latest":%s,"available":%s,"incomplete":%s,' \
+		"$(installed_epoch)" "$(clean "$(value built "$BUILD_FILE")" 40)" "$(clean "$(value source "$BUILD_FILE")" 16)" "$latest" "$available" "$incomplete"
+	printf '"checked":%s,"check_error":"%s","state":"%s","stage":"%s","started":%s,"finished":%s,"message":"%s","auto":%s,"now":%s}\n' \
+		"$(num "$checked")" "$(clean "$check_error" 240)" "$(clean "$state" 12)" "$(clean "$stage" 12)" "$(num "$started")" \
+		"$(num "$finished")" "$(clean "$message" 300)" "$auto" "$(date +%s)"
+}
+
+check() {
+	is_running && die "An update is running."
+	check_now || die "$CHECK_ERROR"
+	status
+}
+
+# False only when the free space is known to be too small.
+room() { # path kilobytes
+	local free
+	free="$(df -k "$1" 2>/dev/null | tail -n 1 | awk '{ print $(NF-2) }')"
+	case "$free" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$free" -ge "$2" ]
+}
+
+finish() { # done|current|failed message
+	printf '%s %s %s\n' "$1" "$(date +%s)" "$(clean "$2" 300)" > "$RESULT.tmp" && mv -f "$RESULT.tmp" "$RESULT"
+	rm -f "$STATE" "$INSTALLER" "$WORKER"
+	exit 0
+}
+
+run_install() {
+	local started url sha size wanted reason
+	ensure_run_dir || exit 1
+	command -v flock >/dev/null 2>&1 || exit 1
+	exec 9>"$LOCK" || exit 1
+	flock -n 9 || exit 1
+	trap '' HUP
+	started="$(date +%s)"
+	echo "check $started" > "$STATE"
+	check_now || finish failed "$CHECK_ERROR"
+	update_available || finish current "This router already has the newest build."
+	url="$(value url "$LATEST")"
+	sha="$(value sha256 "$LATEST")"
+	size="$(value size "$LATEST")"
+	wanted="$(value epoch "$LATEST")"
+	# RAM holds the installer and its unpacked archive; flash takes the unpacked files.
+	room "$ROOT/tmp" $(((size / 1024 + 1) * 3)) || finish failed "Not enough free memory for the update. Nothing was changed."
+	room "$ROOT/overlay" $(((size / 1024 + 1) * 4)) || finish failed "Not enough free storage for the update. Nothing was changed."
+	echo "download $started" > "$STATE"
+	fetch "$url" "$INSTALLER" "$size" 300 || finish failed "Could not download the update. Nothing was changed."
+	[ "$(wc -c < "$INSTALLER" | tr -d ' ')" = "$size" ] && [ "$(sha256sum "$INSTALLER" | cut -d' ' -f1)" = "$sha" ] ||
+		finish failed "The download does not match the signed update, so it was not installed."
+	echo "install $started" > "$STATE"
+	: > "$INCOMPLETE"
+	# Closes the lock for the installer: a service it starts would otherwise hold the lock for as long as it runs.
+	if ! sh "$INSTALLER" </dev/null >"$LOG" 2>&1 9>&-; then
+		reason="$(sed -n 's/^.*ERROR: //p' "$LOG" | head -n 1)"
+		finish failed "${reason:-The installer stopped with an error.} Details: /var/run/junwrt-update/log"
+	fi
+	[ "$(installed_epoch)" = "$wanted" ] || finish failed "The installer finished, but the build did not change. Details: /var/run/junwrt-update/log"
+	rm -f "$INCOMPLETE"
+	finish done "Updated to the build from $(value built "$LATEST")."
+}
+
+start_install() {
+	local i=0
+	is_running && die "An update is already running."
+	ensure_run_dir && cp "$0" "$WORKER" && chmod 0700 "$WORKER" || die "Could not prepare the update."
+	rm -f "$RESULT" "$STATE"
+	# A copy in its own session: the installer replaces this file and restarts rpcd, which started this command.
+	start-stop-daemon -S -b -x "$WORKER" -- run-install || die "Could not start the update."
+	while [ "$i" -lt 10 ]; do
+		sleep 1
+		if is_running || [ -s "$RESULT" ]; then
+			printf '{"success":true}\n'
+			return 0
+		fi
+		i=$((i + 1))
+	done
+	die "The update did not start."
+}
+
+save() {
+	[ $# -eq 1 ] || die "Use auto=0 or auto=1."
+	case "$1" in
+		auto=0|auto=1) ;;
+		*) die "Use auto=0 or auto=1." ;;
+	esac
+	[ -f "$CONF_FILE" ] || touch "$CONF_FILE" 2>/dev/null || die "Could not create the configuration."
+	uci -q get "$CONFIG.main" >/dev/null 2>&1 || uci -q set "$CONFIG.main=update" || die "Could not create the configuration section."
+	uci -q set "$CONFIG.main.auto=${1#auto=}" || die "Could not save the setting."
+	uci -q commit "$CONFIG" || die "Could not commit the configuration."
+	printf '{"success":true}\n'
+}
+
+run_daemon() {
+	local wait
+	sleep "$FIRST_CHECK"
+	while :; do
+		wait="$RETRY_EVERY"
+		if auto_on && ! is_running; then
+			check_now && wait="$CHECK_EVERY"
+		fi
+		sleep "$wait"
+	done
+}
+
+case "${1:-}" in
+	status) status ;;
+	check) check ;;
+	install) start_install ;;
+	run-install) run_install ;;
+	save) shift; save "$@" ;;
+	daemon) run_daemon ;;
+	*) echo "Usage: $0 {status|check|install|save auto=0|auto=1|daemon}"; exit 2 ;;
+esac

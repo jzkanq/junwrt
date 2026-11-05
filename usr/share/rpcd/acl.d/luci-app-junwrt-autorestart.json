@@ -1,0 +1,29 @@
+{
+  "luci-app-junwrt-autorestart": {
+    "description": "Restart the router on a schedule the owner picks",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-autorestart status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-autorestart save *": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

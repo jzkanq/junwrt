@@ -1,0 +1,205 @@
+#!/bin/sh
+# JunWRT Auto Restart: restarts the router on a schedule the owner picks. Off until the owner turns it on.
+
+ROOT="${JUNWRT_AUTORESTART_ROOT:-}" # test hook: prefix for the paths below
+REBOOT="${JUNWRT_AUTORESTART_REBOOT:-/sbin/reboot}"
+CONFIG=junwrt-autorestart
+CONF_FILE="$ROOT/etc/config/$CONFIG"
+RUN_DIR="$ROOT/var/run/junwrt-autorestart"
+BEAT="$RUN_DIR/beat"
+UPTIME_FILE="$ROOT/proc/uptime"
+INSTALL_LOCK="$ROOT/var/run/junwrt-webui-install.lock"
+STEP=30
+DAY=86400
+WINDOW=1800          # a restart delayed by a call or an update may still run this long after its time
+MIN_UPTIME=3600      # with WINDOW below this, a restart can never cause another one
+MIN_CLOCK=1767225600 # 2026-01-01: an earlier clock has not been set yet
+
+die() {
+	printf '{"error":"%s"}\n' "$1"
+	exit 1
+}
+
+clean() {
+	printf '%s' "$1" | tr -d '\001-\037\042\134\177' | cut -c1-"${2:-60}"
+}
+
+num() {
+	case "$1" in
+		''|*[!0-9]*) printf '0' ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+# Clock fields such as 08 would read as octal.
+decimal() {
+	case "$1" in
+		0?) printf '%s' "${1#0}" ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+valid_every() {
+	case "$1" in
+		1|2|3|7|14|30) return 0 ;;
+	esac
+	return 1
+}
+
+valid_at() {
+	case "$1" in
+		[01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) return 0 ;;
+	esac
+	return 1
+}
+
+load_config() {
+	local line key value
+	ENABLED=0; EVERY=1; AT=04:00; SAVED=0
+	while IFS= read -r line; do
+		key="${line%%=*}"
+		value="${line#*=}"
+		value="${value#\'}"
+		value="${value%\'}"
+		case "$key" in
+			"$CONFIG.main.enabled") [ "$value" = 1 ] && ENABLED=1 ;;
+			"$CONFIG.main.every") valid_every "$value" && EVERY="$value" ;;
+			"$CONFIG.main.at") valid_at "$value" && AT="$value" ;;
+			"$CONFIG.main.saved") SAVED="$(num "$value")" ;;
+		esac
+	done <<EOF
+$(uci -q show "$CONFIG.main" 2>/dev/null)
+EOF
+}
+
+# This firmware leaves the shell's clock at UTC even when a time zone is set under System, so apply that setting here.
+read_clock() {
+	local zone sign
+	zone="$(uci -q get 'system.@system[0].timezone' 2>/dev/null)"
+	[ -z "$zone" ] || export TZ="$zone"
+	set -- $(date '+%s %H %M %S %z')
+	NOW="$(num "$1")"
+	MIDNIGHT=$((NOW - $(decimal "$2") * 3600 - $(decimal "$3") * 60 - $(decimal "$4")))
+	ZONE="${5:-+0000}"
+	sign="${ZONE%????}"
+	OFFSET=$(($(decimal "$(printf '%s' "$ZONE" | cut -c2-3)") * 3600 + $(decimal "$(printf '%s' "$ZONE" | cut -c4-5)") * 60))
+	[ "$sign" = - ] && OFFSET=$((0 - OFFSET))
+	UPTIME="$(num "$(cut -d. -f1 "$UPTIME_FILE" 2>/dev/null)")"
+	BOOT=$((NOW - UPTIME))
+	TARGET=$((MIDNIGHT + $(decimal "${AT%:*}") * 3600 + $(decimal "${AT#*:}") * 60))
+	NEED=$(((EVERY - 1) * DAY + MIN_UPTIME))
+	# A clock moved back must not hold restarts back until it catches up.
+	[ "$SAVED" -le "$NOW" ] || SAVED="$NOW"
+}
+
+# Counting from the last start needs no saved state: a restart or power cut starts the count again.
+time_allowed() {
+	[ $(($1 - BOOT)) -ge "$NEED" ] && [ "$1" -ge "$SAVED" ]
+}
+
+is_due() {
+	local when
+	[ "$ENABLED" = 1 ] && [ "$NOW" -ge "$MIN_CLOCK" ] || return 1
+	# Yesterday's time covers a window that crosses midnight.
+	for when in "$TARGET" $((TARGET - DAY)); do
+		[ "$NOW" -ge "$when" ] && [ "$NOW" -lt $((when + WINDOW)) ] && time_allowed "$when" && return 0
+	done
+	return 1
+}
+
+# shortcut: adds 24 hours per day, so a daylight-saving change would shift it by an hour; upgrade if a buyer's zone has one.
+next_restart() {
+	local when="$TARGET"
+	while [ "$when" -le "$NOW" ] || ! time_allowed "$when"; do
+		when=$((when + DAY))
+	done
+	printf '%s' "$when"
+}
+
+# Why a restart has to wait, if it does.
+busy_reason() {
+	if pidof sysupgrade >/dev/null 2>&1; then
+		printf 'a firmware flash'
+	elif [ -f "$INSTALL_LOCK" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$INSTALL_LOCK" true 2>/dev/null; then
+		printf 'an update'
+	else
+		case "$(mipc_wan_cli --get_call_status 2>/dev/null)" in
+			*'result:0,count:'[1-9]*) printf 'a phone call' ;;
+		esac
+	fi
+}
+
+status() {
+	local running=0 beat next=0 next_text="" waiting="" clock_ok=0
+	load_config
+	read_clock
+	beat="$(cat "$BEAT" 2>/dev/null)"
+	case "$beat" in
+		''|*[!0-9]*) ;;
+		*) [ "$UPTIME" -ge "$beat" ] && [ $((UPTIME - beat)) -le $((STEP * 3)) ] && running=1 ;;
+	esac
+	[ "$NOW" -ge "$MIN_CLOCK" ] && clock_ok=1
+	if [ "$ENABLED" = 1 ] && [ "$clock_ok" = 1 ]; then
+		if is_due; then
+			next="$NOW"
+			waiting="$(busy_reason)"
+		else
+			next="$(next_restart)"
+		fi
+		next_text="$(date -d "@$next" '+%a %d %b %H:%M' 2>/dev/null)"
+	fi
+	printf '{"enabled":%s,"every":%s,"at":"%s","running":%s,"now":%s,"uptime":%s,"clock_ok":%s,"clock":"%s","offset":%s,"next":%s,"next_text":"%s","waiting":"%s"}\n' \
+		"$ENABLED" "$EVERY" "$AT" "$running" "$NOW" "$UPTIME" "$clock_ok" "$(clean "$(date '+%a %d %b %H:%M' 2>/dev/null)")" "$OFFSET" "$next" "$(clean "$next_text")" "$waiting"
+}
+
+save() {
+	local arg key value
+	[ $# -gt 0 ] || die "Nothing to save."
+	for arg in "$@"; do
+		case "$arg" in
+			*=*) ;;
+			*) die "Use key=value pairs." ;;
+		esac
+		key="${arg%%=*}"
+		value="${arg#*=}"
+		case "$key" in
+			enabled) case "$value" in 0|1) ;; *) die "enabled must be 0 or 1." ;; esac ;;
+			every) valid_every "$value" || die "Pick how often: 1, 2, 3, 7, 14 or 30 days." ;;
+			at) valid_at "$value" || die "Pick a time such as 04:00." ;;
+			*) die "Unknown setting: $(clean "$key" 24)." ;;
+		esac
+	done
+	[ -f "$CONF_FILE" ] || touch "$CONF_FILE" 2>/dev/null || die "Could not create the configuration."
+	uci -q get "$CONFIG.main" >/dev/null 2>&1 || uci -q set "$CONFIG.main=autorestart" || die "Could not create the configuration section."
+	for arg in "$@"; do
+		uci -q set "$CONFIG.main.${arg%%=*}=${arg#*=}" || die "Could not save ${arg%%=*}."
+	done
+	# A time that has already passed today must not restart the router the moment it is saved.
+	uci -q set "$CONFIG.main.saved=$(date +%s)" || die "Could not save the setting."
+	uci -q commit "$CONFIG" || die "Could not commit the configuration."
+	printf '{"success":true}\n'
+}
+
+run_daemon() {
+	mkdir -p "$RUN_DIR"
+	while :; do
+		load_config
+		read_clock
+		printf '%s\n' "$UPTIME" > "$BEAT"
+		if is_due && [ -z "$(busy_reason)" ]; then
+			logger -t junwrt-autorestart "Scheduled restart: every $EVERY day(s) at $AT, up for $UPTIME seconds"
+			sync
+			"$REBOOT"
+			# The restart takes a moment; do not ask twice meanwhile.
+			sleep 120
+		fi
+		sleep "$STEP"
+	done
+}
+
+case "${1:-}" in
+	status) status ;;
+	save) shift; save "$@" ;;
+	daemon) run_daemon ;;
+	*) echo "Usage: $0 {status|save key=value...|daemon}"; exit 2 ;;
+esac

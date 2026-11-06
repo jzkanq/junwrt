@@ -120,6 +120,13 @@ module JunPhone
     end
   end
 
+  # logread keeps about two minutes, so the last 20 exit reasons stay in RAM for the next report.
+  def self.record_exit(path,message,now=Time.now)
+    dir=File.dirname(path);Dir.mkdir(dir,0700) unless Dir.exist?(dir)
+    old=File.exist?(path) ? File.readlines(path).last(19) : []
+    File.open(path,'w',0600){|f|f.write(old.join);f.puts("#{now.utc} #{message.to_s.gsub(/[[:cntrl:]]+/,' ')[0,200]}")}
+  end
+
   # A pure state machine: the adapter owns hardware, processes and modem calls.
   class Controller
     attr_reader :state,:digits
@@ -317,10 +324,13 @@ module JunPhone
       sleep 0.2
       raise 'ETDM capture did not start' if Process.waitpid(@capture.pid,Process::WNOHANG)
     end
-    def digits
+    def digits(decode=true)
       return [] unless @capture
       raise 'ETDM capture stopped' if @capture_error
       @lock.synchronize do
+      unless decode
+        @buf=''.b;@decoder.reset;return []
+      end
       found=[]
       while @buf.bytesize>=820
         samples=@buf.byteslice(0,820).unpack('s<*').each_slice(2).map(&:first)
@@ -344,7 +354,7 @@ module JunPhone
       mix('ETDM_LPBK_OUT_MUX',0);tone(false);@controller=Controller.new(self)
       log 'ready: Si32184, idle PCM 8kHz, slots 1/1'
       @running=true;Signal.trap('TERM'){@running=false};Signal.trap('INT'){@running=false}
-      current=[];last_poll=Time.now-1;last_ui=Time.now-1;unknown_since=nil;bad_clock=0
+      current=[];last_poll=Time.now-1;last_ui=Time.now-1;unknown_since=nil;clock_lost=nil
       while @running
         if Time.now-last_poll>=0.5
           begin
@@ -358,17 +368,19 @@ module JunPhone
           end
           last_poll=Time.now
         end
-        hook=@spi.hook;bad_clock=hook.nil? ? bad_clock+1 : 0
-        raise 'PCM clock lost for 5 seconds' if bad_clock>=100
+        hook=@spi.hook;clock_lost=hook.nil? ? (clock_lost||Time.now) : nil
+        raise 'PCM clock lost for 5 seconds' if clock_lost && Time.now-clock_lost>=5
         if Time.now-last_ui>=0.25
           handle_web(hook)
           write_status(hook,current)
           last_ui=Time.now
         end
-        ds=digits
+        # Keypad tones only matter with the handset up; decoding idle line audio cost about a quarter of a CPU core.
+        ds=digits(hook==true)
         @controller.tick(Time.now.to_f,hook,current)
         ds.each{|d|@controller.tick(Time.now.to_f,hook,current,d)}
-        sleep 0.02
+        # On-hook and idle, a 0.1 s poll still notices a lifted handset at once with five times fewer SPI reads.
+        sleep(hook==false && current.empty? && @controller.state==:idle ? 0.1 : 0.02)
       end
     ensure
       cleanup
@@ -418,6 +430,7 @@ if __FILE__==$0
     JunPhone::Runtime.new.run(ARGV[0] || '/usr/share/junwrt-phone/si32184-init.txt')
   rescue => e
     STDERR.puts("junwrt-phone: #{e.message}")
+    JunPhone.record_exit('/var/run/junwrt-phone/exits',e.message) rescue nil
     exit 1
   end
 end

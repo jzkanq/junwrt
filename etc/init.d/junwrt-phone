@@ -9,7 +9,8 @@ start_service() {
     procd_open_instance
     procd_set_param command /usr/bin/ruby /usr/bin/junwrt-phone
     [ -z "$JUNWRT_PHONE_TEST_NUMBER" ] || procd_set_param env JUNWRT_PHONE_TEST_NUMBER="$JUNWRT_PHONE_TEST_NUMBER"
-    procd_set_param respawn 3600 10 10
+    # Never give up: after 10 quick crashes the RJ11 port used to stay dead until a manual restart.
+    procd_set_param respawn 3600 30 0
     procd_set_param term_timeout 20
     procd_set_param stdout 1
     procd_set_param stderr 1

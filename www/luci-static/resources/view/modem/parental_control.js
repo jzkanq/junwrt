@@ -30,6 +30,14 @@ function command(args) {
         return data;
     });
 }
+// Minutes the router clock is ahead of this device (negative: behind), read from its local
+// "YYYY-MM-DD HH:MM:SS" time and rounded to 15 minutes.
+function clockGap(routerTime) {
+    var m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)/.exec(routerTime || '');
+    if (!m) return 0;
+    var routerEast = (Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) - Date.now()) / 60000;
+    return Math.round((routerEast + new Date().getTimezoneOffset()) / 15) * 15;
+}
 function field(label, input, help) {
     return E('label', { 'class': 'pc-field' }, [E('span', {}, label), input,
         help ? E('small', {}, help) : '']);
@@ -60,6 +68,12 @@ return view.extend({
                 value.applied ? _('Rules applied') : _('Waiting for service to apply rules'));
             var notices = [];
             if (!value.clock_ok) notices.push(_('Router clock is not ready. Scheduled devices stay blocked until the clock is valid.'));
+            var gap = value.clock_ok ? clockGap(value.router_time) : 0;
+            if (Math.abs(gap) > 14 * 60)
+                notices.push(_('The router clock does not match this device. Schedules use the router clock; check the time under System.'));
+            else if (gap)
+                notices.push(_('The router clock is %s hours %s this device. Schedules use the router clock, shown above. To change it, set the time zone under System.')
+                    .format(Math.round(Math.abs(gap) / 6) / 10, gap < 0 ? _('behind') : _('ahead of')));
             if (value.hardware_offload) notices.push(_('Hardware NAT is loaded. Verify that existing downloads stop at the schedule boundary on this router; accelerated traffic may bypass firewall controls.'));
             if (value.enforcement_error) notices.push(value.enforcement_error);
             warning.textContent = notices.join(' ');

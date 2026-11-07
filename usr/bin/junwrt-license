@@ -25,11 +25,19 @@ get_machine_id() {
 		cid=$(cat /sys/block/mmcblk0boot0/device/cid 2>/dev/null | tr -d ' \r\n')
 	fi
 
-	local mac=""
-	for iface in ra0 eth0 br-lan eth1 mipc0; do
+	# The factory 2.4 GHz MAC in nvcfg equals ra0's address and survives a flash. First boot runs
+	# before ra0 exists, when eth0 has a random MAC, so only IDs from these two sources are cached.
+	local mac="" stable=0
+	[ -f /mnt/vendor/nvcfg/wifi_24g_mac ] && mac=$(head -n 1 /mnt/vendor/nvcfg/wifi_24g_mac 2>/dev/null | tr -d ' :\r\n' | tr 'a-z' 'A-Z')
+	case "$mac" in
+		000000000000|*[!0-9A-F]*) mac="" ;;
+		????????????) stable=1 ;;
+		*) mac="" ;;
+	esac
+	[ -n "$mac" ] || for iface in ra0 eth0 br-lan eth1 mipc0; do
 		if [ -f "/sys/class/net/$iface/address" ]; then
 			mac=$(cat "/sys/class/net/$iface/address" 2>/dev/null | tr -d ' :\r\n' | tr 'a-z' 'A-Z')
-			[ -n "$mac" ] && [ "$mac" != "000000000000" ] && break
+			[ -n "$mac" ] && [ "$mac" != "000000000000" ] && { [ "$iface" = ra0 ] && stable=1; break; }
 		fi
 	done
 
@@ -57,8 +65,10 @@ get_machine_id() {
 	local c4=$(echo "$hash" | cut -c13-16)
 
 	local mid="AW1K-${c1}-${c2}-${c3}-${c4}"
-	echo "$mid" > /etc/junwrt_machine_id 2>/dev/null || true
-	chmod 0644 /etc/junwrt_machine_id 2>/dev/null || true
+	if [ "$stable" = 1 ]; then
+		echo "$mid" > /etc/junwrt_machine_id 2>/dev/null || true
+		chmod 0644 /etc/junwrt_machine_id 2>/dev/null || true
+	fi
 	echo "$mid" > /tmp/junwrt_machine_id 2>/dev/null || true
 	echo "$mid"
 }

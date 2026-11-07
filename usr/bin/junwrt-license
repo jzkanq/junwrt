@@ -140,105 +140,27 @@ verify_token_str() {
 	return 0
 }
 
-# Reserved chains: remove only license-owned jumps/chains, never matching owner rules.
-license_chain() {
-	"$1" -w 5 -t "$2" -N "$3" 2>/dev/null || "$1" -w 5 -t "$2" -S "$3" >/dev/null 2>&1
-}
-license_rule() {
-	local tool="$1" table="$2" chain="$3"
-	shift 3
-	"$tool" -w 5 -t "$table" -C "$chain" "$@" 2>/dev/null || \
-		"$tool" -w 5 -t "$table" -A "$chain" "$@" 2>/dev/null
-}
-license_jump() {
-	"$1" -w 5 -t "$2" -C "$3" -j "$4" 2>/dev/null || \
-		"$1" -w 5 -t "$2" -I "$3" 1 -j "$4" 2>/dev/null
-}
-license_release_chain() {
-	local tool="$1" table="$2" parent="$3" chain="$4"
-	"$tool" -w 5 -t "$table" -S "$parent" >/dev/null 2>&1 || return 1
-	while "$tool" -w 5 -t "$table" -C "$parent" -j "$chain" 2>/dev/null; do
-		"$tool" -w 5 -t "$table" -D "$parent" -j "$chain" 2>/dev/null || return 1
-	done
-	if "$tool" -w 5 -t "$table" -S "$chain" >/dev/null 2>&1; then
-		"$tool" -w 5 -t "$table" -F "$chain" 2>/dev/null || return 1
-		"$tool" -w 5 -t "$table" -X "$chain" 2>/dev/null || return 1
+# Reserved chains: shared with the boot and firewall reload hook.
+enforce_rules() {
+	local mid token
+	if [ -f "$LIC_FILE" ]; then
+		mid=$(get_machine_id)
+		token=$(cat "$LIC_FILE")
+		if verify_token_str "$token" "$mid"; then
+			license_unlock_body
+			return $?
+		fi
 	fi
-}
-license_rule_lock() {
-	local result
-	mkdir -p /var/run || return 1
-	command -v flock >/dev/null 2>&1 || return 1
-	exec 7>/var/run/junwrt-license.rules.lock || return 1
-	flock -n 7 || { exec 7>&-; return 1; }
-	"$@"
-	result=$?
-	flock -u 7 || result=1
-	exec 7>&-
-	return "$result"
-}
-license_lock_body() {
-	local tool reject wan_dev failed=0
-	for tool in iptables ip6tables; do
-		[ "$tool" != ip6tables ] || command -v "$tool" >/dev/null 2>&1 || continue
-		case "$tool" in iptables) reject=icmp-port-unreachable ;; *) reject=icmp6-port-unreachable ;; esac
-		license_chain "$tool" filter JUN_LIC_F || { failed=1; continue; }
-		license_chain "$tool" filter JUN_LIC_I || { failed=1; continue; }
-		license_rule "$tool" filter JUN_LIC_F -i br-lan -j REJECT --reject-with "$reject" || failed=1
-		for wan_dev in ccmni0 ccmni1 ccmni2 wwan0 eth1 eth0 rndis0; do
-			license_rule "$tool" filter JUN_LIC_F -o "$wan_dev" -j REJECT --reject-with "$reject" || failed=1
-		done
-		license_rule "$tool" filter JUN_LIC_I -i br-lan -p udp --dport 53 -j REJECT --reject-with "$reject" || failed=1
-		license_rule "$tool" filter JUN_LIC_I -i br-lan -p tcp --dport 53 -j REJECT --reject-with tcp-reset || failed=1
-		license_jump "$tool" filter FORWARD JUN_LIC_F || failed=1
-		license_jump "$tool" filter INPUT JUN_LIC_I || failed=1
-	done
-	license_chain iptables nat JUN_LIC_N || failed=1
-	license_rule iptables nat JUN_LIC_N -i br-lan -p tcp --dport 80 -j DNAT --to-destination 192.168.1.1:80 || failed=1
-	license_jump iptables nat PREROUTING JUN_LIC_N || failed=1
-	[ "$failed" = 0 ]
-}
-license_unlock_body() {
-	local tool failed=0
-	for tool in iptables ip6tables; do
-		[ "$tool" != ip6tables ] || command -v "$tool" >/dev/null 2>&1 || continue
-		license_release_chain "$tool" filter FORWARD JUN_LIC_F || failed=1
-		license_release_chain "$tool" filter INPUT JUN_LIC_I || failed=1
-	done
-	license_release_chain iptables nat PREROUTING JUN_LIC_N || failed=1
-	[ "$failed" = 0 ]
-}
-lock_rules() {
-	if license_rule_lock license_lock_body; then
-		logger -t junwrt-license "FIRMWARE LOCKED: Valid license key required." || true
-	else
-		logger -t junwrt-license "ERROR: License firewall rules could not be installed; watchdog will retry."
-		return 1
+	if ! license_lock_body; then
+		logger -t junwrt-license "Could not install the license firewall rules."
 	fi
-}
-unlock_rules() {
-	if license_rule_lock license_unlock_body; then
-		logger -t junwrt-license "FIRMWARE ACTIVATED: License restrictions cleared." || true
-	else
-		logger -t junwrt-license "ERROR: License firewall rules could not be cleared; watchdog will retry."
-		return 1
-	fi
+	return 1
 }
 
 enforce_firewall() {
-	if [ ! -f "$LIC_FILE" ]; then
-		lock_rules
-		return 1
-	fi
-	local mid=$(get_machine_id)
-	local token=$(cat "$LIC_FILE")
-	if verify_token_str "$token" "$mid"; then
-		unlock_rules
-		return $?
-	else
-		lock_rules
-		return 1
-	fi
+	[ -r /usr/lib/junwrt-license-firewall.sh ] || return 1
+	. /usr/lib/junwrt-license-firewall.sh
+	license_rule_lock "${1:-}" enforce_rules
 }
 
 watchdog_loop() {
@@ -263,16 +185,8 @@ case "$1" in
 		exit $?
 		;;
 
-	lock-rules)
-		lock_rules
-		;;
-
-	unlock-rules)
-		unlock_rules
-		;;
-
 	enforce-firewall)
-		enforce_firewall
+		enforce_firewall "${2:-}"
 		exit $?
 		;;
 
@@ -327,7 +241,7 @@ case "$1" in
 					exit 1
 				fi
 				lic_tmp=""
-				if ! unlock_rules; then
+				if ! enforce_firewall; then
 					echo '{"success":false,"message":"License saved, but the firewall update failed. Retry activation."}'
 					exit 1
 				fi
@@ -336,6 +250,10 @@ case "$1" in
 					echo '{"success":false,"message":"License saved, but the firewall reload failed. Retry activation."}'
 					exit 1
 				fi
+			if ! enforce_firewall reload; then
+				echo '{"success":false,"message":"License saved, but the firewall could not confirm activation. Retry activation."}'
+				exit 1
+			fi
 				echo '{"success":true,"message":"Firmware activated successfully. License restrictions removed."}'
 				exit 0
 				;;

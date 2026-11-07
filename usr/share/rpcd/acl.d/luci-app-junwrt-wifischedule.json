@@ -1,0 +1,29 @@
+{
+  "luci-app-junwrt-wifischedule": {
+    "description": "Turn the chosen Wi-Fi bands off at night and back on in the morning",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-wifisched status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-wifisched save *": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

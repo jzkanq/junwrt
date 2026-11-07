@@ -1,0 +1,95 @@
+#!/bin/sh
+# JunWRT signal history: records the cellular signal every 2 minutes for a 24-hour chart.
+# Off by default. Readings stay in RAM (a restart clears them) and each one asks the modem once,
+# through the same 3ginfo script the Overview page uses.
+# Paths are fixed on purpose (no environment overrides).
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+RUN=/var/run/junwrt-signal
+CONF=/etc/config/junwrt-signal
+MODEM_INFO=/usr/share/3ginfo-lite/3ginfo.sh
+INTERVAL=120
+KEEP=720
+
+die() {
+	printf '{"error":"%s"}\n' "$1"
+	exit 1
+}
+
+load() {
+	ENABLED=$(uci -q get junwrt-signal.main.enabled); [ "$ENABLED" = 1 ] || ENABLED=0
+}
+
+field() {
+	jsonfilter -s "$1" -e "@.$2" 2>/dev/null | head -n 1
+}
+
+# A signed number with at most one decimal, or "-" when the modem gave none.
+number() {
+	if printf '%s' "$1" | grep -Eq '^-?[0-9]+(\.[0-9]+)?$'; then echo "$1"; else echo -; fi
+}
+
+# "B28 (700 MHz)" -> B28, "n78 (3500 MHz)" -> n78.
+band() {
+	printf '%s' "$1" | sed 's/ .*//' | tr -cd 'A-Za-z0-9' | cut -c1-6
+}
+
+sample() {
+	local m rsrp sinr rsrq p s label
+	if command -v timeout >/dev/null 2>&1; then
+		m=$(timeout 30 "$MODEM_INFO" json 2>/dev/null)
+	else
+		m=$("$MODEM_INFO" json 2>/dev/null)
+	fi
+	[ -n "$m" ] || return 1
+	rsrp=$(number "$(field "$m" rsrp)"); sinr=$(number "$(field "$m" sinr)"); rsrq=$(number "$(field "$m" rsrq)")
+	[ "$rsrp" = - ] && [ "$sinr" = - ] && return 1
+	p=$(band "$(field "$m" pband)"); s=$(band "$(field "$m" s1band)")
+	label=${p:--}${s:++$s}
+	echo "$(date +%s) $rsrp $sinr $rsrq $label" >> "$RUN/history"
+	if [ "$(wc -l < "$RUN/history")" -gt "$KEEP" ]; then
+		tail -n "$KEEP" "$RUN/history" > "$RUN/history.tmp" && mv "$RUN/history.tmp" "$RUN/history"
+	fi
+}
+
+daemon() {
+	mkdir -p "$RUN"
+	chmod 700 "$RUN"
+	while :; do
+		date +%s > "$RUN/heartbeat"
+		load
+		[ "$ENABLED" = 1 ] && sample
+		sleep "$INTERVAL"
+	done
+}
+
+status() {
+	local now beat running=0
+	load
+	now=$(date +%s)
+	beat=$(cat "$RUN/heartbeat" 2>/dev/null)
+	case "$beat" in ''|*[!0-9]*) ;; *) [ $((now - beat)) -le $((INTERVAL + 60)) ] && running=1 ;; esac
+	printf '{"enabled":%s,"running":%s,"interval":%s,"now":%s,"samples":[' "$ENABLED" "$running" "$INTERVAL" "$now"
+	[ -s "$RUN/history" ] && awk -v since=$((now - 86400)) '
+		function num(v) { return v == "-" ? "null" : v }
+		$1 ~ /^[0-9]+$/ && $1 >= since && NF == 5 {
+			printf "%s[%s,%s,%s,%s,\"%s\"]", (n++ ? "," : ""), $1, num($2), num($3), num($4), $5
+		}' "$RUN/history"
+	printf ']}\n'
+}
+
+save() {
+	shift
+	case "$*" in enabled=0|enabled=1) ;; *) die 'Invalid setting.' ;; esac
+	[ -f "$CONF" ] || : > "$CONF" || die 'Could not create the settings file.'
+	uci -q get junwrt-signal.main >/dev/null || uci -q set junwrt-signal.main=signal
+	uci -q set "junwrt-signal.main.$1" && uci -q commit junwrt-signal || die 'Could not save the settings.'
+	status
+}
+
+case "$1" in
+	status) status ;;
+	save) save "$@" ;;
+	clear) rm -f "$RUN/history"; status ;;
+	daemon) daemon ;;
+	*) die 'Usage: junwrt-signal status | save enabled=0|1 | clear | daemon' ;;
+esac

@@ -1,0 +1,15 @@
+{
+  "admin/modem/wifischedule": {
+    "title": "Wi-Fi Schedule",
+    "order": 56,
+    "action": {
+      "type": "view",
+      "path": "modem/wifischedule"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-wifischedule"
+      ]
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "luci-app-junwrt-signal": {
+    "description": "Record the cellular signal every 2 minutes for a 24-hour chart",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-signal status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-signal save *": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-signal clear": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

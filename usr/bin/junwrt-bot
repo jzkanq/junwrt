@@ -1,0 +1,333 @@
+#!/bin/sh
+# JunWRT Telegram bot: answers a few fixed commands from the Telegram chat set in Modem > Notifications.
+# Off by default. The bot token goes to curl on stdin, so it never shows in the process list. Message
+# text is only compared with fixed commands; it is never run or passed to a shell.
+# Paths are fixed on purpose (no environment overrides): this helper can restart the router.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+RUN=/var/run/junwrt-bot
+CONF=/etc/config/junwrt-bot
+API=https://api.telegram.org
+MODEM_INFO=/usr/share/3ginfo-lite/3ginfo.sh
+USAGE=/usr/bin/junwrt-usage
+WIFI=/usr/bin/junwrt-wifi-status
+LEASES=/tmp/dhcp.leases
+INSTALL_LOCK=/var/run/junwrt-webui-install.lock
+
+die() {
+	printf '{"error":"%s"}\n' "$1"
+	exit 1
+}
+
+load() {
+	ENABLED=$(uci -q get junwrt-bot.main.enabled); [ "$ENABLED" = 1 ] || ENABLED=0
+	REBOOT=$(uci -q get junwrt-bot.main.reboot); [ "$REBOOT" = 1 ] || REBOOT=0
+	TOKEN=$(uci -q get junwrt-notify.main.telegram_token)
+	CHAT=$(uci -q get junwrt-notify.main.telegram_chat)
+}
+
+token_ok() {
+	case "$TOKEN" in ''|*[!0-9A-Za-z:_-]*) return 1 ;; [0-9]*:?*) return 0 ;; esac
+	return 1
+}
+
+# Commands come from one private chat or group, so the chat ID must be its number.
+chat_ok() {
+	case "$CHAT" in ''|-|*[!0-9-]*|?*-*) return 1 ;; esac
+	return 0
+}
+
+# tg METHOD SECONDS name=value...: one Bot API call. "text@FILE" sends that file's text.
+tg() {
+	local method="$1" wait="$2" arg
+	shift 2
+	{
+		printf 'url = "%s/bot%s/%s"\n' "$API" "$TOKEN" "$method"
+		for arg in "$@"; do printf 'data-urlencode = "%s"\n' "$arg"; done
+	} | curl -sS -m "$wait" -K - 2>/dev/null
+}
+
+ok_response() {
+	[ "$(jsonfilter -s "$1" -e '@.ok' 2>/dev/null)" = true ]
+}
+
+set_error() {
+	printf '%s\n' "$1" > "$RUN/error"
+}
+
+api_error() {
+	local code
+	if [ -z "$1" ]; then
+		set_error 'No connection to Telegram.'
+		return
+	fi
+	code=$(jsonfilter -s "$1" -e '@.error_code' 2>/dev/null)
+	case "$code" in
+		401|404) set_error 'Telegram refused the bot token. Check it in Modem > Notifications.' ;;
+		409) set_error 'Another program or a webhook already reads this bot. Only one can.' ;;
+		*[!0-9]*|'') set_error 'Telegram answered with an error.' ;;
+		*) set_error "Telegram answered with error $code." ;;
+	esac
+}
+
+field() {
+	jsonfilter -s "$1" -e "@.$2" 2>/dev/null | head -n 1 | tr -d '\000-\037' | cut -c1-80
+}
+
+num() {
+	case "$1" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac
+}
+
+gb() {
+	awk -v b="$1" 'BEGIN { printf "%.2f GB", b / 1000000000 }'
+}
+
+uptime_text() {
+	local s
+	read -r s _ < /proc/uptime
+	s=${s%.*}
+	printf '%sd %sh %sm' $((s / 86400)) $((s % 86400 / 3600)) $((s % 3600 / 60))
+}
+
+modem_json() {
+	if command -v timeout >/dev/null 2>&1; then
+		timeout 30 "$MODEM_INFO" json 2>/dev/null
+	else
+		"$MODEM_INFO" json 2>/dev/null
+	fi
+}
+
+help_text() {
+	printf 'JunWRT commands:\n'
+	printf '/status - network, signal and data today\n'
+	printf '/usage - data used today and this period\n'
+	printf '/devices - connected devices\n'
+	printf '/reboot - restart the router (asks you to confirm; turn it on in Modem > Telegram Bot)\n'
+}
+
+usage_lines() {
+	local u trx ttx rx tx cap pct start
+	u=$("$USAGE" status 2>/dev/null)
+	start=$(num "$(field "$u" period_start)")
+	if [ "$start" = 0 ]; then
+		printf 'Data Usage is not available.\n'
+		return
+	fi
+	trx=$(num "$(field "$u" today_rx)"); ttx=$(num "$(field "$u" today_tx)")
+	rx=$(num "$(field "$u" rx)"); tx=$(num "$(field "$u" tx)")
+	cap=$(num "$(field "$u" cap_gb)"); pct=$(num "$(field "$u" percent)")
+	printf 'Today: %s down, %s up\n' "$(gb "$trx")" "$(gb "$ttx")"
+	printf 'Since %s: %s\n' "$(echo "$start" | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/')" "$(gb $((rx + tx)))"
+	[ "$cap" = 0 ] || printf 'Monthly limit %s GB, %s%% used\n' "$cap" "$pct"
+}
+
+status_text() {
+	local m op mode sig rsrp sinr
+	m=$(modem_json)
+	op=$(field "$m" operator_name); mode=$(field "$m" mode)
+	sig=$(field "$m" signal); rsrp=$(field "$m" rsrp); sinr=$(field "$m" sinr)
+	printf 'JunWRT, up %s\n' "$(uptime_text)"
+	printf '%s\n' "${op:-Unknown network}${mode:+, $mode}"
+	printf 'Signal %s%%, RSRP %s dBm, SINR %s dB\n' "${sig:--}" "${rsrp:--}" "${sinr:--}"
+	usage_lines
+}
+
+devices_text() {
+	local w n i=0 label count
+	w=$("$WIFI" status 2>/dev/null)
+	n=$(jsonfilter -s "$w" -e '@.networks[*].label' 2>/dev/null | grep -c .)
+	printf 'Wi-Fi:\n'
+	[ "$n" -gt 0 ] || printf '  not available\n'
+	while [ "$i" -lt "$n" ]; do
+		label=$(field "$w" "networks[$i].label")
+		count=$(jsonfilter -s "$w" -e "@.networks[$i].stations[*].mac" 2>/dev/null | grep -c .)
+		printf '  %s: %s connected\n' "${label:-network}" "$count"
+		i=$((i + 1))
+	done
+	printf 'Devices with an address:\n'
+	if [ -s "$LEASES" ]; then
+		awk 'NR <= 20 { name = ($4 == "*" || $4 == "") ? "unknown" : $4; printf "  %s (%s)\n", name, $3 }' "$LEASES" | tr -d '\000-\011\013-\037'
+	else
+		printf '  none\n'
+	fi
+}
+
+reboot_off() {
+	printf 'Restart by Telegram is off. Turn it on in Modem > Telegram Bot.\n'
+}
+
+reboot_request() {
+	[ "$REBOOT" = 1 ] || { reboot_off; return; }
+	date +%s > "$RUN/reboot-asked"
+	printf 'Send /reboot confirm within 60 seconds to restart the router. It is offline for about 3 minutes.\n'
+}
+
+reboot_confirm() {
+	local asked now calls
+	[ "$REBOOT" = 1 ] || { reboot_off; return; }
+	asked=$(cat "$RUN/reboot-asked" 2>/dev/null)
+	rm -f "$RUN/reboot-asked"
+	now=$(date +%s)
+	case "$asked" in ''|*[!0-9]*) printf 'Send /reboot first.\n'; return ;; esac
+	if [ $((now - asked)) -gt 60 ]; then
+		printf 'Too late. Send /reboot again.\n'
+		return
+	fi
+	if pidof sysupgrade >/dev/null 2>&1 || ! flock -n "$INSTALL_LOCK" true 2>/dev/null; then
+		printf 'An update is running. Try again when it has finished.\n'
+		return
+	fi
+	# An unknown call status does not block the restart, as in Auto Restart.
+	calls=$(mipc_wan_cli --get_call_status 2>/dev/null)
+	case "$calls" in *result:0,count:0*|'') ;; *result:0,count:*) printf 'A phone call is active. Try again after it ends.\n'; return ;; esac
+	printf 'Restarting now.\n'
+	: > "$RUN/reboot-now"
+}
+
+record() {
+	local handled
+	handled=$(num "$(cat "$RUN/handled" 2>/dev/null)")
+	echo $((handled + 1)) > "$RUN/handled"
+	printf '%s %s\n' "$(date +%s)" "$1" > "$RUN/last"
+}
+
+handle() {
+	local cmd r
+	cmd=$(printf '%s' "$1" | head -n 1 | tr 'A-Z' 'a-z' | sed -e 's/@[a-z0-9_]*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+	case "$cmd" in
+		/start|/help) help_text; record /help ;;
+		/status) status_text; record /status ;;
+		/usage) usage_lines; record /usage ;;
+		/devices) devices_text; record /devices ;;
+		/reboot) reboot_request; record /reboot ;;
+		'/reboot confirm') reboot_confirm; record '/reboot confirm' ;;
+		*) printf 'Unknown command. Send /help for the list.\n'; record unknown ;;
+	esac > "$RUN/reply"
+	r=$(tg sendMessage 20 "chat_id=$CHAT" "text@$RUN/reply")
+	ok_response "$r" || api_error "$r"
+	if [ -f "$RUN/reboot-now" ]; then
+		rm -f "$RUN/reboot-now"
+		logger -t junwrt-bot 'Restart requested by Telegram'
+		sleep 2
+		sync
+		reboot
+	fi
+}
+
+# At most 20 commands a minute; the rest are dropped without a reply.
+rate_ok() {
+	local minute n m
+	minute=$(($(date +%s) / 60))
+	{ read -r m n < "$RUN/rate"; } 2>/dev/null
+	[ "$m" = "$minute" ] || n=0
+	n=$((n + 1))
+	echo "$minute $n" > "$RUN/rate"
+	[ "$n" -le 20 ]
+}
+
+ignored() {
+	local n
+	n=$(num "$(cat "$RUN/ignored" 2>/dev/null)")
+	echo $((n + 1)) > "$RUN/ignored"
+}
+
+# Start after the newest waiting message, so commands sent while the router was off never run late.
+skip_backlog() {
+	local r last
+	r=$(tg getUpdates 20 'offset=-1' 'timeout=0')
+	ok_response "$r" || { api_error "$r"; return 1; }
+	last=$(jsonfilter -s "$r" -e '@.result[*].update_id' 2>/dev/null | tail -n 1)
+	case "$last" in ''|*[!0-9]*) OFFSET=0 ;; *) OFFSET=$((last + 1)) ;; esac
+}
+
+poll_once() {
+	local r id i=0 chat text
+	r=$(tg getUpdates 65 "offset=$OFFSET" 'timeout=50')
+	ok_response "$r" || { api_error "$r"; return 1; }
+	rm -f "$RUN/error"
+	for id in $(jsonfilter -s "$r" -e '@.result[*].update_id' 2>/dev/null); do
+		chat=$(jsonfilter -s "$r" -e "@.result[$i].message.chat.id" 2>/dev/null)
+		text=$(jsonfilter -s "$r" -e "@.result[$i].message.text" 2>/dev/null)
+		i=$((i + 1))
+		case "$id" in *[!0-9]*) continue ;; esac
+		OFFSET=$((id + 1))
+		if [ "$chat" != "$CHAT" ]; then
+			ignored
+			continue
+		fi
+		rate_ok && handle "$text"
+	done
+	return 0
+}
+
+daemon() {
+	mkdir -p "$RUN"
+	chmod 700 "$RUN"
+	OFFSET=
+	KEY=
+	while :; do
+		date +%s > "$RUN/heartbeat"
+		load
+		if [ "$ENABLED" != 1 ]; then
+			OFFSET=
+			rm -f "$RUN/error"
+			sleep 20
+			continue
+		fi
+		if ! token_ok || ! chat_ok; then
+			OFFSET=
+			set_error 'Set a Telegram bot token and a numeric chat ID in Modem > Notifications first.'
+			sleep 30
+			continue
+		fi
+		if [ -z "$OFFSET" ] || [ "$KEY" != "$TOKEN|$CHAT" ]; then
+			skip_backlog || { sleep 30; continue; }
+			KEY="$TOKEN|$CHAT"
+		fi
+		poll_once || sleep 30
+	done
+}
+
+status() {
+	local now beat running=0 last_time=0 last_cmd= error
+	load
+	now=$(date +%s)
+	beat=$(num "$(cat "$RUN/heartbeat" 2>/dev/null)")
+	[ "$beat" != 0 ] && [ $((now - beat)) -le 120 ] && running=1
+	if [ -s "$RUN/last" ]; then
+		read -r last_time last_cmd < "$RUN/last"
+		last_time=$(num "$last_time")
+		last_cmd=$(printf '%s' "$last_cmd" | tr -cd 'a-z/ ' | cut -c1-20)
+	fi
+	error=$(head -n 1 "$RUN/error" 2>/dev/null | tr -d '"\\\000-\037' | cut -c1-160)
+	printf '{"enabled":%s,"reboot":%s,"running":%s,"token_set":%s,"chat_ok":%s,"now":%s,"last_time":%s,"last_command":"%s","handled":%s,"ignored":%s,"problem":"%s"}\n' \
+		"$ENABLED" "$REBOOT" "$running" "$(token_ok && echo 1 || echo 0)" "$(chat_ok && echo 1 || echo 0)" "$now" \
+		"$last_time" "$last_cmd" "$(num "$(cat "$RUN/handled" 2>/dev/null)")" "$(num "$(cat "$RUN/ignored" 2>/dev/null)")" "$error"
+}
+
+save() {
+	local pair key value
+	shift
+	[ $# -gt 0 ] || die 'Nothing to save.'
+	for pair in "$@"; do
+		key=${pair%%=*}
+		value=${pair#*=}
+		case "$key" in
+			enabled|reboot) case "$value" in 0|1) ;; *) die "Invalid value for $key." ;; esac ;;
+			*) die 'Unknown setting.' ;;
+		esac
+	done
+	[ -f "$CONF" ] || : > "$CONF" || die 'Could not create the settings file.'
+	uci -q get junwrt-bot.main >/dev/null || uci -q set junwrt-bot.main=bot
+	for pair in "$@"; do
+		uci -q set "junwrt-bot.main.${pair%%=*}=${pair#*=}" || die 'Could not save the settings.'
+	done
+	uci -q commit junwrt-bot || die 'Could not save the settings.'
+	status
+}
+
+case "$1" in
+	status) status ;;
+	save) save "$@" ;;
+	daemon) daemon ;;
+	*) die 'Usage: junwrt-bot status | save enabled=0|1 reboot=0|1 | daemon' ;;
+esac

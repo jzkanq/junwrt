@@ -1,0 +1,29 @@
+{
+  "luci-app-junwrt-bot": {
+    "description": "Answer /status, /usage, /devices and a confirmed /reboot from your Telegram chat",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-bot status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-bot save *": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

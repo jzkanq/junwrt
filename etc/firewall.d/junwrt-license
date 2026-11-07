@@ -1,0 +1,11 @@
+#!/bin/sh
+# fw3 sources this include. Limit side effects to a subshell.
+(
+	. /usr/lib/junwrt-license-firewall.sh || exit 1
+	# Seed the lock independently of the activation helper and its watchdog.
+	if ! license_rule_lock reload license_lock_body; then
+		logger -t junwrt-license "Could not seed the license firewall rules."
+		exit 1
+	fi
+	/usr/bin/junwrt-license enforce-firewall reload >/dev/null 2>&1 || true
+)

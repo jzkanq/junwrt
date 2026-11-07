@@ -1,0 +1,15 @@
+{
+  "admin/modem/signal": {
+    "title": "Signal History",
+    "order": 57,
+    "action": {
+      "type": "view",
+      "path": "modem/signal"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-signal"
+      ]
+    }
+  }
+}

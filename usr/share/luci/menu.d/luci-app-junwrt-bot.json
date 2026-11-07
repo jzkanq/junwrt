@@ -1,0 +1,15 @@
+{
+  "admin/modem/bot": {
+    "title": "Telegram Bot",
+    "order": 55,
+    "action": {
+      "type": "view",
+      "path": "modem/bot"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-bot"
+      ]
+    }
+  }
+}

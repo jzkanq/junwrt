@@ -8,7 +8,7 @@ START=98
 USE_PROCD=1
 
 start_service() {
-	[ -s /etc/junwrt_machine_id ] || /usr/bin/junwrt-license machine-id > /etc/junwrt_machine_id 2>/dev/null || true
+	[ -s /etc/junwrt_machine_id ] || /usr/bin/junwrt-license machine-id >/dev/null 2>&1 || true
 	chmod 0644 /etc/junwrt_machine_id 2>/dev/null || true
 
 	# Immediate enforcement
@@ -23,8 +23,4 @@ start_service() {
 
 reload_service() {
 	/usr/bin/junwrt-license enforce-firewall >/dev/null 2>&1 || true
-}
-
-stop_service() {
-	/usr/bin/junwrt-license unlock-rules >/dev/null 2>&1 || true
 }

@@ -1,0 +1,43 @@
+#mainmenu .junwrt-modem-group::after {
+    content: none;
+}
+
+#mainmenu .junwrt-modem-group summary {
+    box-sizing: border-box;
+    min-height: 44px;
+    padding: 12px 0;
+    color: var(--menu-color);
+    cursor: pointer;
+    font-size: .875rem;
+    line-height: 20px;
+}
+
+#mainmenu .junwrt-modem-group summary:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+    border-radius: 4px;
+}
+
+#mainmenu .junwrt-modem-group .junwrt-modem-current {
+    font-weight: 600;
+}
+
+#mainmenu .junwrt-modem-group details[open] > ul {
+    display: block;
+    margin: 0 0 4px;
+    padding: 0 0 0 14px;
+}
+
+#mainmenu .junwrt-modem-menu li a {
+    box-sizing: border-box;
+    display: block;
+    min-height: 44px;
+    padding-block: 12px;
+    font-size: .875rem;
+    line-height: 20px;
+}
+
+[data-theme="dark"] #mainmenu .junwrt-modem-group summary,
+.dark-mode #mainmenu .junwrt-modem-group summary {
+    color: var(--jw-text-primary);
+}

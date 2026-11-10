@@ -8,10 +8,17 @@ var STATES = {
     ok: [_('Online'), 'is-ok'],
     degraded: [_('Checks failing'), 'is-warn'],
     recovering: [_('Recovering'), 'is-warn'],
+    paused: [_('WAN turned off'), ''],
+    unavailable: [_('WAN status unavailable'), 'is-warn'],
     stopped: [_('Service not running'), 'is-bad'],
     disabled: [_('Off'), '']
 };
-var ACTIONS = { redial: _('Re-dialed the interface'), radio: _('Restarted the modem radio'), reboot: _('Rebooted the router') };
+var ACTIONS = {
+    redial: _('Requested WAN refresh'),
+    redial_failed: _('WAN refresh request failed'),
+    radio: _('Restarted the modem radio'),
+    reboot: _('Rebooted the router')
+};
 
 function command(args) {
     return fs.exec('/usr/bin/junwrt-guard', args).then(function(result) {
@@ -138,8 +145,9 @@ return view.extend({
         }
         function checkNow() {
             return run(['check'], _('Checking the connection…'), function(result) {
-                say(result.ok ? _('Online: %s answered through %s.').format(result.target, result.device || _('the default route'))
-                    : _('No answer from any target%s.').format(result.device ? _(' through %s').format(result.device) : ''), !result.ok);
+                say(result.ok ? _('Online: %s answered through %s.').format(result.target, result.device)
+                    : result.device ? _('No answer from any target through %s.').format(result.device)
+                    : _('The configured WAN has no active data link.'), !result.ok);
             });
         }
 
@@ -157,7 +165,7 @@ return view.extend({
         root.appendChild(E('link', { rel: 'stylesheet', href: L.resource('view/modem/junwrt-ui.css') }));
         root.appendChild(E('header', { 'class': 'ju-header' }, [
             E('div', {}, [E('h1', {}, _('Connection Guard')),
-                E('p', { 'class': 'ju-help' }, _('Watches the cellular connection and, only when it stays down, re-dials it and restarts the modem radio. Off by default.'))]),
+                E('p', { 'class': 'ju-help' }, _('Refreshes the cellular WAN after several failed checks in a row. Turn on Connection Guard to use it.'))]),
             pill]));
         root.appendChild(E('section', { 'class': 'ju-card' }, [
             E('div', { 'class': 'ju-card-head' }, E('h2', {}, _('Status'))),
@@ -170,11 +178,12 @@ return view.extend({
             E('div', { 'class': 'ju-card-head' }, E('h2', {}, _('Settings'))),
             E('div', { 'class': 'ju-form' }, [
                 toggle('enabled', _('Turn Connection Guard on'), _('Checks run through the cellular interface. Nothing is changed while the connection answers.')),
-                select('interval', _('Check every'), [[15, _('15 seconds')], [30, _('30 seconds')], [60, _('1 minute')], [120, _('2 minutes')], [300, _('5 minutes')]]),
+                select('interval', _('Time between checks'), [[5, _('5 seconds (fast)')], [15, _('15 seconds')], [30, _('30 seconds')], [60, _('1 minute')], [120, _('2 minutes')], [300, _('5 minutes')]],
+                    _('For the quickest WAN refresh, use 5 seconds and 2 failed checks.')),
                 select('failures', _('Act after failed checks in a row'), [[2, '2'], [3, '3'], [4, '4'], [6, '6'], [10, '10']]),
                 field('targets', _('Check targets'), E('input', { type: 'text', maxlength: '160', placeholder: '1.1.1.1 8.8.8.8' }),
                     _('Up to 4 IP addresses or host names, separated by spaces. The connection counts as up when any one answers.'), true),
-                toggle('redial', _('Step 1 · re-dial the interface'), _('Brings the interface down and up again. Safe and quick.')),
+                toggle('redial', _('Step 1 · refresh WAN'), _('Re-dials the configured interface. Leave steps 2 and 3 off for WAN-only recovery.')),
                 toggle('radio', _('Step 2 · restart the modem radio'), _('Cycles the 5G modem radio (AT+CFUN). The link drops for 20–40 seconds.')),
                 toggle('reboot', _('Step 3 · reboot the router'), _('Last resort. Never runs within 15 minutes of boot, and only after the earlier steps have been tried.')),
                 select('cooldown', _('Wait between actions'), [[120, _('2 minutes')], [300, _('5 minutes')], [600, _('10 minutes')], [1800, _('30 minutes')]]),
@@ -190,7 +199,7 @@ return view.extend({
             log, logEmpty
         ]));
         root.appendChild(E('details', { 'class': 'ju-details' }, [E('summary', {}, _('How it works')),
-            E('p', { 'class': 'ju-help' }, _('Every check sends one ping to each target through the cellular interface. After the chosen number of failed checks in a row, the guard runs the next enabled step, waits, and checks again; a success resets everything. Steps repeat in order, never more often than the cooldown and never more than the daily limit. Settings and events are kept in RAM and UCI only; nothing is sent anywhere.'))]));
+            E('p', { 'class': 'ju-help' }, _('Checks use the configured WAN only. A missing data link counts as a failed check while WAN is set to start automatically. An answering target resets the failure count. Recovery attempts follow the cooldown and daily limit.'))]));
 
         showStatus(data);
         if (refreshPoll) poll.remove(refreshPoll);

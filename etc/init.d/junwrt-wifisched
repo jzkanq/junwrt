@@ -15,6 +15,7 @@ start_service() {
 
 # Give Wi-Fi back if the service stops during the off time.
 stop_service() {
+    rm -f /var/run/junwrt-wifisched/keep-off
     [ -e /var/run/junwrt-wifisched/off ] || return 0
     for name in $(sort /var/run/junwrt-wifisched/off); do
         case "$name" in ra[0-9]|ra[0-9][0-9]|rai[0-9]|rai[0-9][0-9]) ifconfig "$name" up ;; esac

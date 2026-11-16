@@ -33,6 +33,7 @@ valid_days() {
 }
 
 load() {
+	KEEP_OFF=$(uci -q get junwrt-wifisched.main.keep_off); [ "$KEEP_OFF" = 1 ] || KEEP_OFF=0
 	ENABLED=$(uci -q get junwrt-wifisched.main.enabled); [ "$ENABLED" = 1 ] || ENABLED=0
 	OFF=$(uci -q get junwrt-wifisched.main.off); valid_time "$OFF" || OFF=23:00
 	ON=$(uci -q get junwrt-wifisched.main.on); valid_time "$ON" || ON=07:00
@@ -92,16 +93,22 @@ wifi_off() {
 	local name list=
 	for name in $(band_ifaces | sort -r); do
 		is_up "$name" || continue
-		ifconfig "$name" down && list="$list$name
+		ifconfig "$name" down || continue
+		if [ "$KEEP_OFF" = 1 ]; then
+			grep -Fxq "$name" "$RUN/off" 2>/dev/null || printf '%s\n' "$name" >> "$RUN/off"
+		else
+			list="$list$name
 "
+		fi
 	done
+	[ "$KEEP_OFF" = 0 ] || return 0
 	printf '%s' "$list" > "$RUN/off"
 	logger -t junwrt-wifisched "Wi-Fi off by schedule: $(echo $list)"
 }
 
 wifi_on() {
 	local name
-	for name in $(sort "$RUN/off" 2>/dev/null); do
+	for name in $(sort -u "$RUN/off" 2>/dev/null); do
 		case "$name" in ra[0-9]|ra[0-9][0-9]|rai[0-9]|rai[0-9][0-9]) ;; *) continue ;; esac
 		[ -e "$NET/$name" ] && ifconfig "$name" up
 	done
@@ -115,7 +122,18 @@ wifi_on() {
 # the person saving; a restart clears that, so after a restart at night Wi-Fi goes off again.
 tick() {
 	load
+	if [ "$KEEP_OFF" = 1 ]; then
+		BANDS=both
+		: > "$RUN/keep-off"
+		wifi_off
+		rm -f "$RUN/skip"
+		return 0
+	fi
 	use_router_zone
+	if [ -e "$RUN/keep-off" ]; then
+		rm -f "$RUN/keep-off"
+		[ -e "$RUN/off" ] && wifi_on
+	fi
 	if [ "$ENABLED" = 1 ] && clock_ok && inside; then
 		[ -e "$RUN/off" ] || [ -e "$RUN/skip" ] || wifi_off
 	else
@@ -131,12 +149,13 @@ daemon() {
 	while :; do
 		date +%s > "$RUN/heartbeat"
 		tick
-		sleep 30
+		sleep 5
 	done
 }
 
 next_text() {
 	local now day d w off names='Sun Mon Tue Wed Thu Fri Sat'
+	[ "$KEEP_OFF" = 0 ] || return
 	if [ -e "$RUN/off" ]; then
 		printf 'Back on at %s' "$ON"
 		return
@@ -171,10 +190,10 @@ status() {
 	case "$beat" in ''|*[!0-9]*) ;; *) [ $((now - beat)) -le 90 ] && running=1 ;; esac
 	if [ -e "$RUN/off" ]; then
 		off_now=1
-		ifaces=$(sort "$RUN/off" | tr -cd 'a-z0-9\n' | tr '\n' ' ' | sed 's/ $//')
+		ifaces=$(sort -u "$RUN/off" | tr -cd 'a-z0-9\n' | tr '\n' ' ' | sed 's/ $//')
 	fi
-	printf '{"enabled":%s,"off":"%s","on":"%s","days":"%s","bands":"%s","running":%s,"wifi_off":%s,"interfaces":"%s","clock_ok":%s,"clock":"%s","offset":%s,"next_text":"%s"}\n' \
-		"$ENABLED" "$OFF" "$ON" "$DAYS" "$BANDS" "$running" "$off_now" "$ifaces" "$(clock_ok && echo 1 || echo 0)" \
+	printf '{"enabled":%s,"keep_off":%s,"off":"%s","on":"%s","days":"%s","bands":"%s","running":%s,"wifi_off":%s,"interfaces":"%s","clock_ok":%s,"clock":"%s","offset":%s,"next_text":"%s"}\n' \
+		"$ENABLED" "$KEEP_OFF" "$OFF" "$ON" "$DAYS" "$BANDS" "$running" "$off_now" "$ifaces" "$(clock_ok && echo 1 || echo 0)" \
 		"$(date '+%a %d %b %H:%M')" "$(offset)" "$(next_text)"
 }
 
@@ -190,7 +209,7 @@ offset() {
 }
 
 save() {
-	local pair key value off= on=
+	local pair key value off= on= keep_off_changed=0
 	shift
 	[ $# -gt 0 ] || die 'Nothing to save.'
 	load
@@ -200,6 +219,10 @@ save() {
 		value=${pair#*=}
 		case "$key" in
 			enabled) case "$value" in 0|1) ;; *) die 'Invalid value for enabled.' ;; esac ;;
+			keep_off)
+				case "$value" in 0|1) ;; *) die 'Invalid value for keep_off.' ;; esac
+				keep_off_changed=1
+				;;
 			off) valid_time "$value" || die 'Pick a time such as 23:00.'; off=$value ;;
 			on) valid_time "$value" || die 'Pick a time such as 07:00.'; on=$value ;;
 			days) valid_days "$value" || die 'Pick at least one day.' ;;
@@ -214,6 +237,10 @@ save() {
 		uci -q set "junwrt-wifisched.main.${pair%%=*}=${pair#*=}" || die 'Could not save the settings.'
 	done
 	uci -q commit junwrt-wifisched || die 'Could not save the settings.'
+	if [ "$keep_off_changed" = 1 ] || [ "$KEEP_OFF" = 1 ]; then
+		status
+		return
+	fi
 	# Turning the schedule off, or moving the times, gives Wi-Fi back at once.
 	mkdir -p "$RUN"
 	load

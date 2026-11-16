@@ -30,6 +30,8 @@ return view.extend({
         var message = E('p', { 'class': 'ju-message', role: 'status', 'aria-live': 'polite' });
         var notice = E('p', { 'class': 'ju-notice' });
         var values = {};
+        var keepOff = E('input', { type: 'checkbox', id: 'wifisched-keep-off' });
+        var savedKeepOff = false;
         var enabled = E('input', { type: 'checkbox', id: 'wifisched-enabled' });
         var off = E('input', { type: 'time', id: 'wifisched-off', required: true });
         var on = E('input', { type: 'time', id: 'wifisched-on', required: true });
@@ -49,6 +51,15 @@ return view.extend({
             var gap = s.offset + new Date().getTimezoneOffset() * 60;
             var hours = Math.round(Math.abs(gap) / 360) / 10;
             var on_ = !!s.enabled;
+            if (s.keep_off) {
+                pill.className = 'ju-pill ' + (s.running ? 'is-ok' : 'is-bad');
+                pill.textContent = s.running ? _('Keep Wi-Fi off active') : _('Service not running');
+                values.clock.textContent = s.clock || '–';
+                values.wifi.textContent = s.running ? _('Checking every 5 seconds') : '–';
+                values.next.textContent = _('Until turned off');
+                notice.hidden = true;
+                return;
+            }
             pill.className = 'ju-pill ' + (!on_ ? '' : !s.running ? 'is-bad' : !s.clock_ok ? 'is-warn' : 'is-ok');
             pill.textContent = !on_ ? _('Off') : !s.running ? _('Service not running') : !s.clock_ok ? _('Clock not set')
                 : s.wifi_off ? _('Wi-Fi off now') : _('On');
@@ -61,6 +72,8 @@ return view.extend({
             notice.hidden = !notice.textContent;
         }
         function fill(s) {
+            savedKeepOff = !!s.keep_off;
+            keepOff.checked = savedKeepOff;
             enabled.checked = !!s.enabled;
             off.value = s.off;
             on.value = s.on;
@@ -77,11 +90,15 @@ return view.extend({
             busy = true;
             save.disabled = true;
             say(_('Saving…'));
-            return command(['save', 'enabled=' + (enabled.checked ? 1 : 0), 'off=' + off.value, 'on=' + on.value,
-                'days=' + picked, 'bands=' + bands.value]).then(function(s) {
+            var args = ['save', 'enabled=' + (enabled.checked ? 1 : 0), 'off=' + off.value, 'on=' + on.value,
+                'days=' + picked, 'bands=' + bands.value];
+            if (keepOff.checked !== savedKeepOff)
+                args.push('keep_off=' + (keepOff.checked ? 1 : 0));
+            return command(args).then(function(s) {
                 show(s);
                 fill(s);
-                say(!s.enabled ? _('Saved. Wi-Fi Schedule is off.') : s.wifi_off ? _('Saved. Wi-Fi is off until %s.').format(s.on)
+                say(s.keep_off ? _('Saved. Both bands will be kept off.') :
+                    !s.enabled ? _('Saved. Wi-Fi Schedule is off.') : s.wifi_off ? _('Saved. Wi-Fi is off until %s.').format(s.on)
                     : _('Saved. %s.').format(s.next_text || _('Next off time is set')));
             }).catch(function(error) {
                 say(error.message, true);
@@ -103,6 +120,8 @@ return view.extend({
         ]));
         root.appendChild(E('section', { 'class': 'ju-card' }, [
             E('div', { 'class': 'ju-card-head' }, E('h2', {}, _('Schedule'))),
+            E('label', { 'class': 'ju-check', 'for': 'wifisched-keep-off' }, [keepOff, _('Keep both Wi-Fi bands off')]),
+            E('p', { 'class': 'ju-help' }, _('Use Ethernet before enabling. This overrides the schedule and shuts down reopened access points within five seconds.')),
             E('label', { 'class': 'ju-check', 'for': 'wifisched-enabled' }, [enabled, _('Turn Wi-Fi off on a schedule')]),
             E('div', { 'class': 'ju-form' }, [
                 E('label', { 'class': 'ju-field', 'for': 'wifisched-off' }, [E('span', {}, _('Off at (router clock)')), off]),

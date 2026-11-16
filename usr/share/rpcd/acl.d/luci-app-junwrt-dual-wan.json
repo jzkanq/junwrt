@@ -1,0 +1,15 @@
+{
+  "luci-app-junwrt-dual-wan": {
+    "description": "View live cellular and Ethernet WAN link and tracker status",
+    "read": {
+      "ubus": {
+        "network.interface": [
+          "dump"
+        ],
+        "mwan3": [
+          "status"
+        ]
+      }
+    }
+  }
+}

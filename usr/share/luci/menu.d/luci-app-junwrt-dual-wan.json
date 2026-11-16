@@ -1,0 +1,15 @@
+{
+  "admin/network/junwrt-dual-wan": {
+    "title": "Dual WAN",
+    "order": 27,
+    "action": {
+      "type": "view",
+      "path": "network/junwrt-dual-wan"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-dual-wan"
+      ]
+    }
+  }
+}

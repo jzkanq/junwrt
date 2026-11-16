@@ -12,6 +12,7 @@
 
 <%
 local mtkwifi = require("mtkwifi")
+local keep_off = require("luci.model.uci").cursor():get("junwrt-wifisched", "main", "keep_off") == "1"
 local devs = mtkwifi.get_all_devs()
 local l1dat, l1 = mtkwifi.__get_l1dat()
 local dridx = l1.DEV_RINDEX
@@ -34,6 +35,19 @@ end
   <div class="wifi-page-header">
     <div><h2 class="wifi-page-title"><a name="content"><%:Wi-Fi settings%></a></h2>
     <p class="wifi-page-intro"><%:Manage the name, password and security of your wireless networks.%></p></div>
+    <% if mtkwifi.exists("/usr/bin/junwrt-wifisched") then %>
+    <form class="wifi-keep-off" method="post" action="<%=luci.dispatcher.build_url("admin", "mtk", "wifi", "keep_off")%>">
+      <input type="hidden" name="token" value="<%=token%>">
+      <input type="hidden" name="keep_off" value="<%=keep_off and '0' or '1'%>">
+      <% if keep_off then %>
+        <button type="submit" class="wifi-quick-primary"><%:Allow Wi-Fi%></button>
+        <span class="wifi-quick-help"><%:Both bands are kept off. If Wi-Fi reopens, it is turned off again within about five seconds.%></span>
+      <% else %>
+        <button type="submit" class="cbi-button cbi-button-reset"><%:Keep Wi-Fi off permanently%></button>
+        <span class="wifi-quick-help"><%:Use Ethernet. This disconnects all Wi-Fi devices and keeps both bands off.%></span>
+      <% end %>
+    </form>
+    <% end %>
   </div>
   <% if #devs == 0 then %><div class="wifi-empty"><%:No wireless device found!%></div><% end %>
   <div class="wifi-band-grid">

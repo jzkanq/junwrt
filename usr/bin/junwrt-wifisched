@@ -230,7 +230,7 @@ save() {
 			*) die 'Unknown setting.' ;;
 		esac
 	done
-	[ "$off" != "$on" ] || die 'The off and on times must differ.'
+	[ "$off" != "$on" ] || { [ $# -eq 1 ] && [ "$keep_off_changed" = 1 ]; } || die 'The off and on times must differ.'
 	[ -f "$CONF" ] || : > "$CONF" || die 'Could not create the settings file.'
 	uci -q get junwrt-wifisched.main >/dev/null || uci -q set junwrt-wifisched.main=schedule
 	for pair in "$@"; do

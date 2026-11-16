@@ -22,7 +22,10 @@ html.dark-mode #maincontent .junwrt-wifi-page {
     --wifi-positive-bg: #35363a; --wifi-positive: #6ee7b7; --wifi-positive-line: #5a5d63;
 }
 #maincontent .junwrt-wifi-page *, #maincontent .junwrt-wifi-page *::before, #maincontent .junwrt-wifi-page *::after { box-sizing: border-box; }
-#maincontent .junwrt-wifi-page .wifi-page-header { margin: 0 0 20px; }
+#maincontent .junwrt-wifi-page .wifi-page-header {
+    display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 20px;
+}
+#maincontent .junwrt-wifi-page .wifi-keep-off { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin: 0; }
 #maincontent .junwrt-wifi-page .wifi-page-title,
 #maincontent .junwrt-wifi-page .wifi-card-heading,
 #maincontent .junwrt-wifi-page .wifi-quick-title {

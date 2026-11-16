@@ -68,6 +68,9 @@ function index()
     local quickDevCfg = entry({"admin", "mtk", "wifi", "quick_dev_cfg"}, call("quick_dev_cfg"))
     quickDevCfg.leaf = true
     quickDevCfg.post = true
+    local keepWifiOff = entry({"admin", "mtk", "wifi", "keep_off"}, call("keep_wifi_off"))
+    keepWifiOff.leaf = true
+    keepWifiOff.post = true
     -- entry({"admin", "mtk", "wifi", "dev_cfg_raw"}, call("dev_cfg_raw")).leaf = true
     entry({"admin", "mtk", "wifi", "vif_cfg_view"}, template("admin_mtk/mtk_wifi_vif_cfg")).leaf = true
     entry({"admin", "mtk", "wifi", "vif_cfg"}, call("vif_cfg")).leaf = true
@@ -496,6 +499,31 @@ end
 local function __quick_wifi_error(message)
     http.status(400, "Bad Request")
     http.write(message)
+end
+
+function keep_wifi_off()
+    local dispatcher = require("luci.dispatcher")
+    -- This changes both access points, so require the same write grant as Wi-Fi Schedule.
+    local access = require("luci.util").ubus("session", "access", {
+        ubus_rpc_session = dispatcher.context.authsession,
+        scope = "file",
+        object = "/usr/bin/junwrt-wifisched save *",
+        ["function"] = "exec"
+    })
+    if not access or access.access ~= true then
+        http.status(403, "Forbidden")
+        return
+    end
+
+    local enable = http.formvalue("keep_off")
+    if enable ~= "0" and enable ~= "1" then
+        return __quick_wifi_error("Invalid permanent Wi-Fi setting")
+    end
+    if require("luci.sys").call("/usr/bin/junwrt-wifisched save keep_off=" .. enable .. " >/dev/null 2>&1") ~= 0 then
+        http.status(500, "Could not save Wi-Fi setting")
+        return
+    end
+    http.redirect(dispatcher.build_url("admin", "mtk", "wifi"))
 end
 
 function quick_dev_cfg(devname)

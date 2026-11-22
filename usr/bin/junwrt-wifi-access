@@ -1,0 +1,128 @@
+#!/usr/bin/lua
+-- Per-SSID association deny lists in the vendor MediaTek profiles.
+local json = require 'luci.jsonc'
+local wifi = require 'mtkwifi'
+local nixio = require 'nixio'
+
+local function valid_mac(mac)
+    return type(mac) == 'string' and mac:match('^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$') and
+        mac ~= '00:00:00:00:00:00' and tonumber(mac:sub(1, 2), 16) % 2 == 0
+end
+
+local function valid_ifname(name)
+    return type(name) == 'string' and #name < 16 and name:match('^ra[inx]*%d+$')
+end
+
+local function networks()
+    local devices = wifi.get_all_devs()
+    if type(devices) ~= 'table' or not devices[1] then return nil end
+    local result, by_name = {}, {}
+    local first = wifi.load_profile(devices[1].profile)
+    if type(first) ~= 'table' or not first.SSID1 then return nil end
+    local mesh = first.MapMode == '1'
+    for device_index, device in ipairs(devices) do
+        local profile = device_index == 1 and first or wifi.load_profile(device.profile)
+        for _, vif in ipairs(device.vifs or {}) do
+            local name, index = vif.vifname, tonumber(vif.vifidx)
+            if profile and valid_ifname(name) and index and index >= 1 and index <= 16 and index % 1 == 0
+                and profile['SSID' .. index] then
+                if by_name[name] then return nil end
+                local policy_key, list_key = 'AccessPolicy' .. (index - 1), 'AccessControlList' .. (index - 1)
+                local policy, raw = profile[policy_key] or '0', profile[list_key] or ''
+                local blocked, reason, seen = {}, nil, {}
+                for mac in raw:gmatch('[^;]+') do
+                    if not valid_mac(mac) then
+                        reason = 'This network has an invalid access list. Review it in Wireless settings.'
+                        break
+                    end
+                    mac = mac:upper()
+                    if not seen[mac] then
+                        blocked[#blocked + 1], seen[mac] = mac, true
+                    end
+                end
+                if mesh or profile.MapMode == '1' then
+                    reason = 'Manage access in EasyMesh settings for this network.'
+                elseif policy == '1' then
+                    reason = 'This network uses an allow list. Manage it in Wireless settings.'
+                elseif policy ~= '2' and (policy ~= '0' or raw ~= '') then
+                    reason = 'Review the existing access list in Wireless settings first.'
+                end
+                local wps = wifi.token_get(profile.WscConfMode, index, '0') ~= '0'
+                local row = {ifname=name, ssid=profile['SSID' .. index], reason=reason,
+                    block_reason=wps and 'Turn off WPS in Wireless settings before blocking devices.' or nil,
+                    blocked=policy == '2' and not reason and blocked or {}}
+                result[#result + 1] = row
+                by_name[name] = {row=row, path=device.profile, policy_key=policy_key, list_key=list_key,
+                    policy=policy, raw=raw, active=vif.state == 'up', seen=seen}
+            end
+        end
+    end
+    table.sort(result, function(a, b) return a.ifname < b.ifname end)
+    return result, by_name
+end
+
+local function change(action, name, mac, network)
+    local policy_key, list_key = network.policy_key, network.list_key
+    local blocked = network.row.blocked
+    local present = network.seen[mac]
+    if action == 'block' and not present then
+        if #blocked >= 64 then return nil, 'This network already has 64 blocked addresses.' end
+        blocked[#blocked + 1] = mac
+    elseif action == 'unblock' and present then
+        for index, address in ipairs(blocked) do
+            if address == mac then table.remove(blocked, index); break end
+        end
+    end
+
+    local policy = action == 'block' and '2' or network.policy
+    if policy == '0' then return {success=true, applied=true} end
+    local list = table.concat(blocked, ';')
+    if policy ~= network.policy or list ~= network.raw then
+        -- Pass only the two ACL settings into the existing vendor DAT/NVRAM writer.
+        wifi.save_profile({[policy_key]=policy, [list_key]=list}, network.path)
+        local saved = wifi.load_profile(network.path)
+        if not saved or saved[policy_key] ~= policy or (saved[list_key] or '') ~= list then
+            return nil, 'Could not verify the saved Wi-Fi block list.'
+        end
+    end
+    if not network.active then return {success=true, applied=false, inactive=true} end
+
+    -- Call only vendor ACL setters, with an exact registered interface and valid unicast MAC.
+    -- Keep the saved settings if live application fails so the next Wi-Fi start applies them.
+    local setter = action == 'block' and 'ACLAddEntry' or 'ACLDelEntry'
+    local prefix = '/usr/sbin/iwpriv ' .. name .. ' set '
+    local quiet = ' >/dev/null 2>&1'
+    local applied = os.execute(prefix .. setter .. '=' .. mac .. quiet) == 0 and
+        os.execute(prefix .. 'AccessPolicy=2' .. quiet) == 0
+    return {success=true, applied=applied}
+end
+
+local function run()
+    local action, name, mac = arg[1], arg[2], arg[3]
+    local read = action == 'list' and not name
+    local write = (action == 'block' or action == 'unblock') and valid_ifname(name) and valid_mac(mac) and not arg[4]
+    if not read and not write then return nil, 'Invalid Wi-Fi access request.' end
+    local available, by_name = networks()
+    if not available then return nil, 'Could not verify the Wi-Fi network mapping.' end
+    if read then return {networks=available} end
+    local network = by_name[name]
+    if not network then return nil, 'Unknown Wi-Fi network.' end
+    if network.row.reason then return nil, network.row.reason end
+    if action == 'block' and network.row.block_reason then return nil, network.row.block_reason end
+    return change(action, name, mac:upper(), network)
+end
+
+local lock = nixio.open('/var/lock/junwrt-wifi-access.lock', 'a', '600')
+local ok, result, message
+if lock then
+    if lock:lock('tlock') then ok, result, message = pcall(run) end
+    lock:close()
+end
+if not ok or not result then
+    local error_message = ok and message or (ok == false and 'Could not confirm the Wi-Fi access request.' or
+        'Wi-Fi access settings are busy or unavailable. Try again.')
+    io.write(json.stringify({error=error_message}) .. '\n')
+    os.exit(1)
+end
+local output = json.stringify(result):gsub('"networks":%s*{}', '"networks":[]'):gsub('"blocked":%s*{}', '"blocked":[]')
+io.write(output .. '\n')

@@ -7,6 +7,19 @@
 'require tools.junwrt_qrcode as wifiQR';
 
 var wifiStatusExec = rpc.declare({object:'file', method:'exec', params:['command','params'], nobatch:true});
+var accessControlStyle = 'box-sizing: border-box; min-height: 44px; max-width: 100%; border-radius: 6px; ' +
+	'padding: 6px 14px; font-size: 12px; font-weight: 600; ';
+var accessSecondaryStyle = accessControlStyle + 'background: var(--jw-bg-surface, #ffffff); ' +
+	'color: var(--jw-text-primary, #334155); border: 1px solid var(--jw-border-strong, #cbd5e1);';
+
+function wifiAccess(args) {
+	return wifiStatusExec('/usr/bin/junwrt-wifi-access', args).then(function(result) {
+		var data = JSON.parse(result.stdout || '{}');
+		if (Number(result.code) !== 0 || data.error) throw new Error(data.error || _('Wi-Fi access settings are unavailable.'));
+		return data;
+	});
+}
+
 function vendorNetworks(data) {
 	if (!data || !Array.isArray(data.networks)) throw new Error('Invalid Wi-Fi status response');
 	return data.networks.map(function(net) {
@@ -47,6 +60,108 @@ function wifirate(rt) {
 return baseclass.extend({
 	title: '',
 
+	handleWifiAccess: function(preferredNetwork, station) {
+		var saving = false;
+		var status = E('p', {role:'status'});
+		var panel = E('div', {});
+		ui.showModal(_('Wi-Fi block list'), [
+			E('p', {}, [_('Blocks the selected MAC address from joining one Wi-Fi network. Repeat for each network you want to block it on.')]),
+			status, panel,
+			E('button', {type:'button', class:'btn cbi-button-neutral', style:accessSecondaryStyle, click:ui.hideModal}, _('Close'))
+		], 'jun-wifi-access-modal');
+
+		function refresh(preferred, pendingMac, message, pendingChange) {
+			status.textContent = message || _('Loading Wi-Fi networks…');
+			dom.content(panel, []);
+			return wifiAccess(['list']).then(function(data) {
+				if (!Array.isArray(data.networks) || !data.networks.length)
+					throw new Error(_('No configured Wi-Fi networks were found.'));
+
+				var selector = E('select', {id:'jun-wifi-block-network', style:accessSecondaryStyle}, [
+					E('option', {value:''}, [_('Choose a Wi-Fi network')])
+				].concat(data.networks.map(function(net) {
+					return E('option', {value:net.ifname}, [net.ssid + ' (' + net.ifname + ')']);
+				})));
+				var available = data.networks.some(function(net) { return net.ifname === preferred; });
+				selector.value = available ? preferred : '';
+				var rules = E('div', {});
+				var input = E('input', {id:'jun-wifi-block-mac', type:'text', maxlength:'17', autocomplete:'off',
+					value:pendingMac || '', placeholder:'02:11:22:33:44:55', style:accessSecondaryStyle});
+
+				function update(action, mac, button, retry) {
+					var net = data.networks.find(function(item) { return item.ifname === selector.value; });
+					if (saving || !net || net.reason || (action === 'block' && net.block_reason)) return;
+					if (!/^(?:[\da-f]{2}:){5}[\da-f]{2}$/i.test(mac) ||
+					    mac === '00:00:00:00:00:00' || parseInt(mac.slice(0, 2), 16) % 2) {
+						status.textContent = _('Enter a valid unicast MAC address.');
+						return;
+					}
+					var confirmation = action === 'block'
+						? _('Block %s from joining %s? If this is your device, you may lose access.').format(mac, net.ssid)
+						: _('Unblock %s on %s?').format(mac, net.ssid);
+					if (!retry && !window.confirm(confirmation)) return;
+					saving = true;
+					button.disabled = selector.disabled = true;
+					status.textContent = _('Saving Wi-Fi block list…');
+					return wifiAccess([action, net.ifname, mac]).then(function(result) {
+						if (result.success !== true) throw new Error(_('Could not save the Wi-Fi block list.'));
+						var message = result.applied ? (action === 'block' ? _('Device blocked on this Wi-Fi network.') : _('Device unblocked on this Wi-Fi network.'))
+							: result.inactive ? _('Saved. The change will apply when this Wi-Fi network starts.')
+							: _('Saved, but the router could not confirm live application. Reload Wi-Fi to apply the saved list.');
+						var pending = !result.applied && !result.inactive ? {action:action, mac:mac, ifname:net.ifname} : null;
+						return refresh(net.ifname, '', message, pending);
+					}).catch(function(error) {
+						status.textContent = error.message;
+					}).finally(function() {
+						saving = false;
+						button.disabled = selector.disabled = false;
+					});
+				}
+
+				function showRules() {
+					var net = data.networks.find(function(item) { return item.ifname === selector.value; });
+					if (!net || net.reason) return dom.content(rules, E('p', {}, [net ? net.reason : _('Select a Wi-Fi network.')]));
+					var block = E('button', {type:'button', class:'btn cbi-button-remove',
+						style:accessControlStyle + 'background: #ef4444; color: #ffffff; border: 1px solid #ef4444;',
+						click:function() { return update('block', input.value.trim(), block); }}, _('Block device'));
+					var rows = (Array.isArray(net.blocked) ? net.blocked : []).map(function(mac) {
+						var unblock = E('button', {type:'button', class:'btn cbi-button-neutral', style:accessSecondaryStyle,
+							click:function() { return update('unblock', mac, unblock); }}, _('Unblock'));
+						return E('li', {style:'display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px;'},
+							[E('code', {style:'background: transparent; color: inherit;'}, [mac]), unblock]);
+					});
+					var retry;
+					if (pendingChange && pendingChange.ifname === net.ifname) {
+						retry = E('button', {type:'button', class:'btn cbi-button-neutral', style:accessSecondaryStyle,
+							click:function() { return update(pendingChange.action, pendingChange.mac, retry, true); }}, _('Retry live change'));
+					}
+					dom.content(rules, [
+						retry,
+						net.block_reason ? E('p', {}, [net.block_reason]) : E('div', {}, [
+							E('label', {'for':'jun-wifi-block-mac'}, [_('Device MAC address')]),
+							E('div', {style:'display: flex; flex-wrap: wrap; gap: 8px;'}, [input, block])
+						]),
+						rows.length ? E('ul', {style:'padding: 0; margin: 12px 0;'}, rows)
+							: E('p', {}, [_('No blocked devices on this network.')])
+					]);
+				}
+
+				selector.addEventListener('change', showRules);
+				dom.content(panel, [E('label', {'for':'jun-wifi-block-network'}, [_('Wi-Fi network')]), E('div', {}, selector), rules]);
+				showRules();
+				status.textContent = message || (preferred && !available
+					? _('The original Wi-Fi network is no longer available. Choose a network to continue.') : '');
+			}).catch(function(error) {
+				var failure = error.message || _('Wi-Fi access settings are unavailable.');
+				status.textContent = message ? message + ' ' + failure : failure;
+				dom.content(panel, E('button', {type:'button', class:'btn cbi-button-neutral', style:accessSecondaryStyle,
+					click:function() { return refresh(preferred, pendingMac, message, pendingChange); }}, _('Reload list')));
+			});
+		}
+
+		return refresh(preferredNetwork, station);
+	},
+
 	handleDelClient: function(wifinet, mac, ev) {
 		var confirm = E('button', {
 			'class':'btn cbi-button cbi-button-remove',
@@ -63,7 +178,7 @@ return baseclass.extend({
 			}
 		}, _('Disconnect'));
 		ui.showModal(_('Disconnect Wi-Fi device?'), [
-			E('p', {}, _('Temporarily disconnect ') + mac + ' (' + wifinet.getShortName() + ')?'),
+			E('p', {}, [_('Temporarily disconnect ') + mac + ' (' + wifinet.getShortName() + ')?']),
 			E('p', {}, _('This does not block the device. It may reconnect automatically.')),
 			E('div', {style:'display: flex; justify-content: flex-end; gap: 8px;'}, [
 				E('button', {'class':'btn cbi-button cbi-button-neutral', style:'min-height: 44px; background: var(--jw-bg-surface, #ffffff); color: var(--jw-text-primary, #334155); border: 1px solid var(--jw-border-strong, #cbd5e1); border-radius: 6px; padding: 6px 14px;', click:ui.hideModal}, _('Cancel')),
@@ -96,30 +211,30 @@ return baseclass.extend({
 					'style':'background: var(--jw-bg-surface, #ffffff); border: 1px solid var(--jw-border-subtle, #e2e8f0); border-radius: 8px; padding: 14px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;'
 				}, [
 					E('div', {style:'text-align: left; flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere;'}, [
-						E('div', {style:'font-size: 15px; font-weight: 600; color: var(--jw-text-primary, #0f172a);'}, ssid),
-						E('div', {style:'font-size: 12px; color: var(--jw-text-secondary, #64748b); margin-top: 4px;'}, description),
-						E('div', {style:'font-size: 12px; color: var(--jw-text-secondary, #64748b); margin-top: 4px;'}, _('Security: ') + security),
+						E('div', {style:'font-size: 15px; font-weight: 600; color: var(--jw-text-primary, #0f172a);'}, [ssid]),
+						E('div', {style:'font-size: 12px; color: var(--jw-text-secondary, #64748b); margin-top: 4px;'}, [description]),
+						E('div', {style:'font-size: 12px; color: var(--jw-text-secondary, #64748b); margin-top: 4px;'}, [_('Security: ') + security]),
 						E('button', {'class':'btn cbi-button cbi-button-action', style:'margin-top: 12px; min-height: 44px; background: #0284c7; color: #ffffff; border: 0; font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 6px;', click:function() {
 							var copy;
 							if (navigator.clipboard && navigator.clipboard.writeText) copy = navigator.clipboard.writeText(ssid);
 							else {
-								var field = E('textarea', {readonly:'', style:'position: fixed; left: -9999px;'}, ssid);
+								var field = E('textarea', {readonly:'', style:'position: fixed; left: -9999px;'});
+								field.value = ssid;
 								document.body.appendChild(field); field.select();
 								var copied = document.execCommand('copy'); document.body.removeChild(field);
 								copy = copied ? Promise.resolve() : Promise.reject(new Error('Copy unavailable'));
 							}
-							return copy.then(function() { ui.addNotification(null, E('p', {}, _('SSID copied: ') + ssid)); }).catch(function() { ui.addNotification(null, E('p', {}, _('Select the network name to copy it.'))); });
+							return copy.then(function() { ui.addNotification(null, E('p', {}, [_('SSID copied: ') + ssid])); }).catch(function() { ui.addNotification(null, E('p', {}, _('Select the network name to copy it.'))); });
 						}}, _('Copy SSID'))
 					]),
 					E('div', {style:'flex: 0 1 180px; min-width: 0;'}, [image])
 				]);
 			});
-			var dialog = ui.showModal(_('Fast Wi-Fi Connection'), [
+			ui.showModal(_('Fast Wi-Fi Connection'), [
 				E('p', {style:'font-size: 12px; color: var(--jw-text-secondary, #64748b); margin-bottom: 12px;'}, _('Scan to join. Each QR code includes the network password; share it only with devices you trust.')),
 				E('div', {}, items.length ? items : [E('p', {}, _('No active Wi-Fi networks are available.'))]),
 				E('div', {style:'text-align: right; margin-top: 14px;'}, [E('button', {'class':'btn cbi-button cbi-button-neutral', style:'min-height: 44px; background: var(--jw-bg-surface, #ffffff); border: 1px solid var(--jw-border-strong, #cbd5e1); color: var(--jw-text-primary, #334155); font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 6px;', click:ui.hideModal}, _('Close'))])
 			], 'junwrt-wifi-connect');
-			Object.assign(dialog.style, {display:'block', width:'600px', maxWidth:'calc(100% - 24px)', minWidth:'0', boxSizing:'border-box'});
 		}).catch(function(error) {
 			ui.addNotification(null, E('p', {}, _('Unable to load Wi-Fi connection details. Refresh or sign in with an administrator account.')));
 		}).finally(function() {
@@ -165,13 +280,16 @@ return baseclass.extend({
 	},
 
 	render: function(data) {
-		var radios = data[0] || [];
 		var networks = data[1] || [];
 		var hosthints = data[2] || {};
 		var error = data[3];
 
 		var rows = [];
 		var totalClients = 0;
+		var labels = [_('Radio / SSID'), _('MAC address'), _('Client / IP'), _('Signal'), _('PHY link rate'), _('Actions')];
+		function cell(index, className, content) {
+			return E('div', {class:className}, [E('span', {class:'jun-wifi-station-label'}, [labels[index]])].concat(content));
+		}
 
 		for (var i = 0; i < networks.length; i++) {
 			var net = networks[i];
@@ -203,106 +321,58 @@ return baseclass.extend({
 					}, _('Disconnect'));
 				}
 
-				rows.push(E('div', {
-					'class': 'client-row',
-					'style': 'display: grid; grid-template-columns: 1.8fr 1.8fr 2fr 1.5fr 2.5fr 1fr; padding: 12px 16px; border-bottom: 1px solid #edf2f9; align-items: center; font-size: 12px;'
-				}, [
-					// Network / SSID
-					E('div', { 'style': 'font-weight: 600; color: #32325d; display: flex; align-items: center; gap: 6px;' }, [
-						E('span', { 'style': 'width: 7px; height: 7px; border-radius: 50%; background: #0284c7; display: inline-block;' }),
-						net.vendor ? net.getShortName() : (net.getActiveSSID() || net.getShortName())
+				rows.push(E('div', {class:'client-row'}, [
+					cell(0, 'jun-wifi-station-network', [
+						E('strong', {}, [net.vendor ? net.getShortName() : (net.getActiveSSID() || net.getShortName())])
 					]),
-
-					// MAC Address
-					E('div', { 'style': 'font-family: monospace; color: #525f7f;' }, bss.mac),
-
-					// Host / IP
-					E('div', {}, [
-						E('div', { 'style': 'font-weight: 600; color: #32325d;' }, hostStr),
-						E('div', { 'style': 'font-size: 11px; color: #8898aa; font-family: monospace;' }, ipDetail)
+					cell(1, 'jun-wifi-station-mac', [bss.mac]),
+					cell(2, 'jun-wifi-station-host', [
+						E('strong', {}, [hostStr]),
+						E('div', {class:'jun-wifi-station-ip'}, [ipDetail])
 					]),
-
-					// Signal & Quality
-					E('div', {}, [
-						E('span', {
-							'style': 'font-weight: 600; color: ' + sigColor + '; font-size: 12px;'
-						}, hasSignal ? bss.signal + ' dBm' : _('Unavailable')),
-						E('span', { 'style': 'font-size: 11px; color: #8898aa; margin-left: 4px;' }, hasSignal ? '(' + q + '%)' : '')
+					cell(3, 'jun-wifi-station-signal', [
+						E('span', {style:'font-weight: 600; color: ' + sigColor},
+							[hasSignal ? bss.signal + ' dBm' : _('Unavailable')]),
+						hasSignal ? ' (' + q + '%)' : ''
 					]),
-
-					// PHY Rate
-					E('div', { 'style': 'font-size: 11px; color: #525f7f;' }, [
-						E('div', ['RX: ', E('strong', rxStr)]),
-						E('div', ['TX: ', E('strong', txStr)])
+					cell(4, 'jun-wifi-station-rate', [
+						E('div', {}, ['RX: ', E('strong', {}, [rxStr])]),
+						E('div', {}, ['TX: ', E('strong', {}, [txStr])])
 					]),
-
-					// Action
-					E('div', {}, actionBtn)
+					E('div', {class:'jun-wifi-station-actions'}, [
+						actionBtn,
+						net.vendor ? E('button', {type:'button', class:'btn cbi-button-neutral', style:accessSecondaryStyle,
+							click:L.bind(this.handleWifiAccess, this, net.getIfname(), bss.mac)}, _('Block…')) : null
+					])
 				]));
 			}
 		}
 
-		var tableBody = null;
-		if (rows.length > 0) {
-			tableBody = E('div', { 'style': 'background: #ffffff; border-radius: 8px; border: 1px solid #e2e8f0; overflow: hidden;' }, [
-				E('div', {
-					'style': 'display: grid; grid-template-columns: 1.8fr 1.8fr 2fr 1.5fr 2.5fr 1fr; padding: 10px 16px; background: #f8fafc; border-bottom: 1px solid #edf2f9; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #8898aa;'
-				}, [
-					E('div', 'Radio / SSID'),
-					E('div', 'MAC Address'),
-					E('div', 'Client Host / IP'),
-					E('div', 'Signal'),
-					E('div', 'PHY Link Rate'),
-					E('div', 'Action')
-				]),
-				E('div', {}, rows)
-			]);
-		} else {
-			tableBody = E('div', {
-				'style': 'background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; text-align: center; color: #8898aa; font-size: 12px;'
-			}, error || 'No wireless stations currently associated.');
-		}
+		var tableBody = rows.length ? E('div', {class:'jun-wifi-stations-table'}, [
+			E('div', {class:'jun-wifi-stations-head'}, labels.map(function(label) { return E('span', {}, [label]); })),
+			E('div', {}, rows)
+		]) : E('p', {}, [error || _('No wireless stations currently associated.')]);
 
-		return E('div', {
-			'class': 'cbi-section junwrt-status-surface',
-			'style': 'background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 2px 12px rgba(50, 50, 93, 0.04), 0 1px 3px rgba(0, 0, 0, 0.02); margin-bottom: 24px; overflow: hidden;'
-		}, [
-			// Header
-			E('div', {
-				'style': 'display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #e2e8f0; background: #ffffff; flex-wrap: wrap; gap: 12px;'
-			}, [
-				E('div', { 'style': 'display: flex; align-items: baseline; gap: 8px;' }, [
-					E('span', { 'style': 'font-size: 15px; font-weight: 700; color: #32325d;' }, 'Wireless Associated Stations'),
-					E('span', { 'style': 'font-size: 12px; color: #8898aa;' }, 'Real-Time Wi-Fi Clients & Signal Quality')
+		return E('div', {class:'cbi-section jun-wifi-stations'}, [
+			E('link', {rel:'stylesheet', href:L.resource('view/status/junwrt-wifi-stations.css')}),
+			E('div', {class:'jun-wifi-stations-header'}, [
+				E('div', {}, [
+					E('h4', {class:'jun-wifi-stations-title'}, [_('Wireless Associated Stations')]),
+					E('span', {}, [error ? _('Station count unavailable') : _('%s Associated Stations').format(totalClients)])
 				]),
-				E('div', { 'style': 'display: flex; align-items: center; gap: 10px; font-size: 12px; flex-wrap: wrap;' }, [
-					E('span', {
-						'style': 'background: #f0f9ff; color: #0284c7; border: 1px solid #bae6fd; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 6px;'
-					}, 'Wi-Fi 6 (802.11ax)'),
-					E('span', { 'style': 'font-weight: 600; color: #0f172a;' }, error ? _('Station count unavailable') : totalClients + ' Associated Stations'),
-					E('button', {
-						'style': 'background: #ffffff; border: 1.5px solid #0284c7; color: #0284c7; font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;',
-						'click': L.bind(this.handleShowQR, this, networks)
-					}, 'Fast Connect QR')
+				E('div', {class:'jun-wifi-stations-toolbar'}, [
+					E('button', {type:'button', class:'btn cbi-button-neutral', style:accessSecondaryStyle,
+						click:L.bind(this.handleWifiAccess, this, null, null)}, _('Manage blocked devices')),
+					E('button', {type:'button', class:'btn cbi-button-neutral', style:accessSecondaryStyle,
+						click:L.bind(this.handleShowQR, this, networks)}, _('Fast Connect QR'))
 				])
 			]),
-
-			// Body
-			E('div', { 'style': 'padding: 20px;' }, [
-				rows.length && error ? E('p', {role:'status'}, error) : '',
+			E('div', {class:'jun-wifi-stations-body'}, [
+				rows.length && error ? E('p', {role:'status'}, [error]) : null,
 				tableBody
 			]),
-
-			// Footer
-			E('div', {
-				'style': 'display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: #f8fafc; border-top: 1px solid #e2e8f0; font-size: 11px; color: #8898aa;'
-			}, [
-				E('div', {}, networks.some(function(net) { return net.vendor; }) ? 'MediaTek MT7915 • Last PHY rates: RX from device, TX to device. Not throughput.' : 'Wi-Fi station telemetry'),
-				E('div', {}, [
-					E('strong', { 'style': 'color: #0284c7; font-weight: 600;' }, 'JunWRT'),
-					' • Low-Jitter Wireless Stack'
-				])
-			])
+			networks.some(function(net) { return net.vendor; }) ? E('p', {class:'jun-wifi-stations-note'},
+				[_('Last reported PHY rates. RX is from the device and TX is to the device.')]) : null
 		]);
 	}
 });

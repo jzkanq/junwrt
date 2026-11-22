@@ -1,0 +1,101 @@
+.jun-wifi-stations {
+    --station-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.25fr)
+        minmax(0, .8fr) minmax(0, 1.15fr) minmax(108px, 1fr);
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--jw-text-primary);
+    background: var(--jw-bg-surface);
+    border: 1px solid var(--jw-border-subtle);
+    border-radius: 12px;
+}
+
+.jun-wifi-stations-header,
+.jun-wifi-stations-toolbar,
+.jun-wifi-station-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.jun-wifi-stations-header {
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--jw-border-subtle);
+}
+
+.jun-wifi-stations-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.jun-wifi-stations-body { padding: 12px 16px; }
+
+.jun-wifi-stations-table {
+    border: 1px solid var(--jw-border-subtle);
+    border-radius: 8px;
+}
+
+.jun-wifi-stations-head,
+.jun-wifi-stations .client-row {
+    display: grid;
+    grid-template-columns: var(--station-columns);
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    font-size: 12px;
+}
+
+.jun-wifi-stations-head {
+    background: var(--jw-bg-elevated);
+    border-bottom: 1px solid var(--jw-border-subtle);
+    border-radius: 8px 8px 0 0;
+    font-weight: 600;
+}
+
+.jun-wifi-stations .client-row + .client-row { border-top: 1px solid var(--jw-border-subtle); }
+.jun-wifi-stations .client-row > * { min-width: 0; }
+.jun-wifi-station-label { display: none; }
+.jun-wifi-station-mac,
+.jun-wifi-station-ip { font-family: ui-monospace, Consolas, monospace; }
+.jun-wifi-station-ip,
+.jun-wifi-stations-note { color: var(--jw-text-secondary); }
+.jun-wifi-stations-note { margin: 0; padding: 0 16px 12px; font-size: 12px; }
+
+#modal_overlay .jun-wifi-access-modal,
+#modal_overlay .junwrt-wifi-connect {
+    display: block;
+    box-sizing: border-box;
+    width: 600px;
+    max-width: calc(100% - 24px);
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+#modal_overlay .jun-wifi-access-modal > h4,
+#modal_overlay .junwrt-wifi-connect > h4 {
+    margin: 0 0 12px;
+    padding: 0;
+    background: transparent;
+}
+
+@media (max-width: 1050px) {
+    .jun-wifi-stations-head { display: none; }
+
+    .jun-wifi-stations .client-row {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: start;
+        gap: 10px 12px;
+    }
+
+    .jun-wifi-station-network,
+    .jun-wifi-station-actions { grid-column: 1 / -1; }
+
+    .jun-wifi-station-label {
+        display: block;
+        margin-bottom: 2px;
+        color: var(--jw-text-secondary);
+        font: 600 11px/1.4 var(--font-family-sans-serif);
+    }
+}

@@ -1,0 +1,32 @@
+{
+  "luci-app-junwrt-dns-history": {
+    "description": "Review recent DNS queries by client and control dnsmasq query logging",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-dns-history status": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/junwrt-dns-history enable": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-dns-history disable": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

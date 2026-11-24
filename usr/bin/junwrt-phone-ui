@@ -25,7 +25,7 @@ local function status()
 end
 local op = arg[1] or 'status'
 if op == 'status' and not arg[2] then emit(status()); return end
-if op ~= 'dial' and op ~= 'answer' and op ~= 'hangup' then fail('Unknown phone action.') end
+if op ~= 'dial' and op ~= 'answer' and op ~= 'hangup' and op ~= 'decline' and op ~= 'clear-history' then fail('Unknown phone action.') end
 local number = arg[2] or ''
 if op == 'dial' then
     local digits = number:gsub('^%+', '')

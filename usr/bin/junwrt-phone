@@ -167,6 +167,10 @@ module JunPhone
         raise 'No phone call to end.' unless @state==:call || @state==:ringing
         @io.hangup if @state==:ringing
         finish(hook==true)
+      elsif op=='decline'
+        raise 'No incoming call to decline.' unless @state==:ringing && states==[4]
+        @io.hangup
+        finish(hook==true)
       else
         raise 'Unknown phone action.'
       end
@@ -215,10 +219,14 @@ module JunPhone
     def initialize(path)
       @path=path;@active=nil
     end
+    def clear
+      File.delete(@path) if File.exist?(@path)
+    end
     def observe(states,now,number='',direction='outgoing')
       if !states.empty?
-        @active||={start: now, number: number, direction: states.include?(4) ? 'incoming' : direction, connected: nil}
-        @active[:number]=number if !number.empty? && @active[:number].empty?
+        direction='incoming' if states.include?(4)
+        @active||={start: now, number: number, direction: direction, connected: nil}
+        @active[:number]=number if direction==@active[:direction] && !number.empty? && @active[:number].empty?
         @active[:connected]||=now if states.include?(0)
       elsif @active
         a=@active;@active=nil
@@ -231,6 +239,54 @@ module JunPhone
     end
   end
 
+  class CallerId
+    def self.parse(output)
+      incoming=output.lines.map do |line|
+        row=/\A\s*\+CLCC:\s*\d+\s*,\s*1\s*,\s*4\s*,\s*(.*)\z/.match(line.strip)
+        row[1] if row
+      end.compact
+      return '' unless incoming.size==1
+      # The AW1000 modem reports mode 20 for its VoLTE voice calls.
+      voice=/\A(?:0|20)\s*,\s*0\s*,\s*"(\+?[0-9]{3,20})"\s*,\s*(\d+)(?:\s*,\s*(?:"[^"]*"|)\s*(?:,\s*\d*\s*(?:,\s*0\s*)?)?)?\z/.match(incoming.first)
+      return '' unless voice
+      number,type=voice.captures
+      type=='145' && !number.start_with?('+') ? '+'+number : number
+    end
+
+    def initialize(&query)
+      @query=query
+      @generation=0
+      @number=''
+      @retry_at=0
+    end
+
+    def observe(call_id,ringing,now)
+      if @call_id!=call_id
+        @call_id=call_id
+        @generation+=1
+        @number=''
+        @retry_at=0
+      end
+      if @worker && !@worker.alive?
+        generation,number=@worker.value
+        @worker=nil
+        @number=number if generation==@generation
+      end
+      if ringing && call_id && @number.empty? && !@worker && now>=@retry_at
+        @retry_at=now+1.5
+        @worker=Thread.new(@generation) do |generation|
+          number=begin
+            CallerId.parse(@query.call)
+          rescue StandardError
+            ''
+          end
+          [generation,number]
+        end
+      end
+      @number
+    end
+  end
+
   class Runtime
     attr_reader :spi
     def initialize
@@ -239,10 +295,10 @@ module JunPhone
     end
     def log(s);STDOUT.puts("#{Time.now.utc} #{s}");STDOUT.flush;end
     # No shell parsing, eval, networking changes, IMS writes or RF GPIO access.
-    def command(*argv)
+    def command(*argv, timeout: 12, private_output: false)
       r,w=IO.pipe
       pid=Process.spawn(*argv,out:w,err:w);w.close
-      output='';deadline=Time.now+12;status=nil
+      output='';deadline=Time.now+timeout;status=nil
       loop do
         if IO.select([r],nil,nil,0.02)
           begin;output<<r.read_nonblock(16384);rescue IO::WaitReadable,EOFError;end
@@ -252,7 +308,7 @@ module JunPhone
         raise "Command timed out: #{argv[0]}" if Time.now>deadline
       end
       begin;output<<r.read;rescue IOError;end
-      raise "Command failed: #{argv[0]} #{output[0,160]}" unless status.success?
+      raise "Command failed: #{argv[0]}#{private_output ? '' : ' '+output[0,160]}" unless status.success?
       output
     ensure
       w.close rescue nil;r.close rescue nil
@@ -263,9 +319,15 @@ module JunPhone
     end
     def mix(n,v);command('amixer','-c','0','cset',"name=#{n}",v.to_s);end
     def states
+      call_status.first
+    end
+    def call_status
       out=command('mipc_wan_cli','--get_call_status')
-      raise 'Invalid call status' unless out.match?(/result:0,count:\d+/)
-      out.scan(/call_state\[\d+\]:(\d+)/).flatten.map(&:to_i)
+      header=/result:0,count:(\d+)/.match(out)
+      calls=out.scan(/call_state\[(\d+)\]:(\d+)/)
+      raise 'Invalid call status' unless header && calls.size==header[1].to_i
+      ids=out.scan(/call_id\[(\d+)\]:(\d+)/).to_h
+      [calls.map{|_,state|state.to_i}, calls.size==1 ? ids[calls.first[0]] : nil]
     end
     def allowed?(digits);@test_number.nil? || @test_number==digits;end
     def dial(d);@call_number=d;@call_direction='outgoing';raise 'Test number restriction' unless allowed?(d);command('mipc_wan_cli',"--dial_request=#{d}");@owned=true;end
@@ -346,6 +408,9 @@ module JunPhone
       Dir.mkdir('/var/run/junwrt-phone',0700) unless Dir.exist?('/var/run/junwrt-phone')
       Dir.mkdir('/etc/junwrt-phone',0700) unless Dir.exist?('/etc/junwrt-phone')
       @history=CallLog.new('/etc/junwrt-phone/calls');@call_number='';@call_direction='outgoing'
+      caller_id=CallerId.new do
+        command('mipc_wan_cli','--at_cmd','AT+CLCC',timeout: 1.5,private_output: true)
+      end
       @instance_lock=File.open('/var/run/junwrt-phone.lock',File::RDWR|File::CREAT,0600)
       raise 'Phone service already running' unless @instance_lock.flock(File::LOCK_EX|File::LOCK_NB)
       raise 'Existing call: leave phone hardware unchanged' unless states.empty?
@@ -358,8 +423,12 @@ module JunPhone
       while @running
         if Time.now-last_poll>=0.5
           begin
-            current=states;unknown_since=nil
-            @history.observe(current,Time.now.to_f,@call_number,@call_direction)
+            current,call_id=call_status;unknown_since=nil
+            now=Time.now.to_f
+            ringing=current==[4]
+            incoming=ringing || @history.active && @history.active[:direction]=='incoming'
+            number=caller_id.observe(call_id,ringing,now)
+            @history.observe(current,now,incoming ? number : @call_number,incoming ? 'incoming' : @call_direction)
             if current.empty? then @call_number='';@call_direction='outgoing' end
           rescue => e
             unknown_since||=Time.now
@@ -371,7 +440,10 @@ module JunPhone
         hook=@spi.hook;clock_lost=hook.nil? ? (clock_lost||Time.now) : nil
         raise 'PCM clock lost for 5 seconds' if clock_lost && Time.now-clock_lost>=5
         if Time.now-last_ui>=0.25
-          handle_web(hook)
+          if handle_web(hook)
+            last_poll=Time.now-1
+            next
+          end
           write_status(hook,current)
           last_ui=Time.now
         end
@@ -389,13 +461,19 @@ module JunPhone
       tmp=path+'.tmp';File.open(tmp,'w',0600){|f|f.write(text)};File.rename(tmp,path)
     end
     def handle_web(hook)
+      refresh=false
       Dir.glob('/var/run/junwrt-phone/request-*').sort.first(1).each do |path|
         id=File.basename(path).sub('request-','')
         next unless id.match?(/\A[0-9-]+\z/)
         op,number,created=File.read(path,128).strip.split("\t",3);File.delete(path)
         begin
           raise 'Request expired.' unless created && (Time.now.to_i-created.to_i).abs<=15
-          @controller.web_command(op,number.to_s,Time.now.to_f,hook,states)
+          if op=='clear-history'
+            @history.clear
+          else
+            @controller.web_command(op,number.to_s,Time.now.to_f,hook,states)
+            refresh=true
+          end
           result='1'
         rescue => e
           result='0'+"\t"+e.message.gsub(/[\t\r\n]/,' ')[0,200]
@@ -403,6 +481,7 @@ module JunPhone
         atomic('/var/run/junwrt-phone/reply-'+id,result)
       end
       Dir.glob('/var/run/junwrt-phone/reply-*').each{|p|File.delete(p) if Time.now-File.mtime(p)>60}
+      refresh
     end
     def write_status(hook,current)
       a=@history.active

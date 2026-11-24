@@ -6,6 +6,12 @@ USE_PROCD=1
 start_service() {
     [ -c /dev/spidev0.0 ] || return 1
     [ -x /usr/bin/ruby ] || return 1
+    if [ -e /etc/junwrt-webui.manifest.sig ] || grep -qx 'integrity=signed' /etc/junwrt-webui.build 2>/dev/null; then
+        if ! /usr/bin/junwrt-integrity verify >/dev/null; then
+            logger -t junwrt-phone 'RJ11 service start blocked because JunWRT integrity verification failed.'
+            return 1
+        fi
+    fi
     procd_open_instance
     procd_set_param command /usr/bin/ruby /usr/bin/junwrt-phone
     [ -z "$JUNWRT_PHONE_TEST_NUMBER" ] || procd_set_param env JUNWRT_PHONE_TEST_NUMBER="$JUNWRT_PHONE_TEST_NUMBER"

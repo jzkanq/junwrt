@@ -27,6 +27,26 @@ build_value() {
 	sed -n "s/^$1=//p" "$BUILD_FILE" 2>/dev/null | head -n 1 | tr -d '\r'
 }
 
+integrity_status() {
+	local state=inactive checked now
+	if [ "$(build_value integrity)" = signed ] || [ -e "$MANIFEST.sig" ]; then
+		state=unavailable
+		if [ -x "$ROOT/usr/bin/junwrt-integrity" ] && [ -r "$ROOT/var/run/junwrt-integrity.state" ]; then
+			read -r state checked < "$ROOT/var/run/junwrt-integrity.state"
+			case "$state" in
+				key|manifest|signature|files|unavailable) ;;
+				ok)
+					now="$(num "$(cut -d. -f1 "$ROOT/proc/uptime" 2>/dev/null)")"
+					checked="$(num "$checked")"
+					[ "$checked" -le "$now" ] && [ "$((now - checked))" -le 630 ] || state=unavailable
+					;;
+				*) state=unavailable ;;
+			esac
+		fi
+	fi
+	printf '{"state":"%s"}\n' "$state"
+}
+
 # verify: sets V_TOTAL V_OK V_CHANGED V_MISSING and V_PROBLEMS (JSON strings) from the manifest.
 verify() {
 	local sum path got listed=0 seen="" expected
@@ -152,7 +172,9 @@ collect() { # directory
 		echo "== addresses"; ip addr 2>/dev/null
 		echo "== routes"; ip route 2>/dev/null
 	} 2>&1 | redact > "$dir/network.txt"
-	{ logread 2>/dev/null | tail -n 400; } | redact > "$dir/log.txt"
+	# Omit DNS History queries and their matching resolver activity.
+	logread 2>/dev/null | sed -E '/ dnsmasq\[[0-9]+\]: ([0-9]+ |query\[)/d' |
+		tail -n 400 | redact > "$dir/log.txt"
 	{ dmesg 2>/dev/null | tail -n 200; } | redact > "$dir/kernel.txt"
 	uci show 2>/dev/null | redact > "$dir/config.txt"
 	if [ -x "$ROOT/usr/share/3ginfo-lite/3ginfo.sh" ]; then
@@ -190,8 +212,9 @@ bundle() {
 
 case "${1:-}" in
 	status) status ;;
+	integrity) integrity_status ;;
 	bundle) bundle ;;
 	verify) verify; printf '{"total":%s,"ok":%s,"changed":%s,"missing":%s,"error":"%s"}\n' "$V_TOTAL" "$V_OK" "$V_CHANGED" "$V_MISSING" "$(clean "$V_ERROR")"
 		[ -z "$V_ERROR" ] && [ "$V_TOTAL" -gt 0 ] && [ "$V_CHANGED" = 0 ] && [ "$V_MISSING" = 0 ] ;;
-	*) echo "Usage: $0 {status|verify|bundle}"; exit 2 ;;
+	*) echo "Usage: $0 {status|verify|integrity|bundle}"; exit 2 ;;
 esac

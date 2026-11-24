@@ -1,0 +1,63 @@
+#!/bin/sh
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+MANIFEST=/etc/junwrt-webui.manifest
+SIGNATURE=/etc/junwrt-webui.manifest.sig
+PUBLIC_KEY=/etc/junwrt_update_pub.pem
+EXPECTED_KEY_SHA256=e641a3d9c53923aec7219b2814d2cff97c74f913f42f1bb43a01e9635bb70685
+STATE=/var/run/junwrt-integrity.state
+INSTALL_LOCK=/var/run/junwrt-webui-install.lock
+
+verify() (
+    umask 077
+    scratch="$(mktemp -d /tmp/junwrt-integrity.XXXXXX)" || exit 1
+    trap 'rm -rf "$scratch"' EXIT
+    trap 'exit 1' HUP INT TERM
+    cp "$PUBLIC_KEY" "$scratch/key" 2>/dev/null || { echo key; exit 1; }
+    digest="$(sha256sum "$scratch/key")" || exit 1
+    [ "${digest%% *}" = "$EXPECTED_KEY_SHA256" ] || { echo key; exit 1; }
+    cp "$MANIFEST" "$scratch/manifest" 2>/dev/null && [ -s "$scratch/manifest" ] ||
+        { echo manifest; exit 1; }
+    openssl dgst -sha256 -verify "$scratch/key" -signature "$SIGNATURE" "$scratch/manifest" >/dev/null 2>&1 ||
+        { echo signature; exit 1; }
+    sha256sum -c "$scratch/manifest" >/dev/null 2>&1 || { echo files; exit 1; }
+)
+
+record() {
+    local result previous next uptime
+    if result="$(verify)"; then
+        result=ok
+    fi
+    case "$result" in
+        ok|key|manifest|signature|files) ;;
+        *) result=unavailable ;;
+    esac
+    previous=
+    [ ! -r "$STATE" ] || read -r previous _ < "$STATE"
+    uptime="$(cut -d. -f1 /proc/uptime)" || return 1
+    next="$(mktemp "$STATE.XXXXXX")" || return 1
+    if ! printf '%s %s\n' "$result" "$uptime" > "$next" || ! mv -f "$next" "$STATE"; then
+        rm -f "$next"
+        return 1
+    fi
+    if [ "$result" != ok ] && [ "$result" != "$previous" ]; then
+        logger -t junwrt-integrity "Installed JunWRT files could not be verified ($result)."
+    fi
+    [ "$result" = ok ]
+}
+
+case "$1" in
+    verify) verify ;;
+    scan) record ;;
+    daemon)
+        while true; do
+            # Skip active upgrades. The installer checks its own writes while holding this lock.
+            (
+                flock -n 8 || exit 0
+                record
+            ) 8>"$INSTALL_LOCK"
+            sleep 300
+        done
+        ;;
+    *) exit 2 ;;
+esac

@@ -28,6 +28,12 @@
         ],
         "/usr/bin/junwrt-phone-ui hangup": [
           "exec"
+        ],
+        "/usr/bin/junwrt-phone-ui decline": [
+          "exec"
+        ],
+        "/usr/bin/junwrt-phone-ui clear-history": [
+          "exec"
         ]
       }
     }

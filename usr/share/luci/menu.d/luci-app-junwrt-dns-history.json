@@ -1,0 +1,15 @@
+{
+  "admin/modem/dns-history": {
+    "title": "DNS History",
+    "order": 58,
+    "action": {
+      "type": "view",
+      "path": "modem/dns_history"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-junwrt-dns-history"
+      ]
+    }
+  }
+}

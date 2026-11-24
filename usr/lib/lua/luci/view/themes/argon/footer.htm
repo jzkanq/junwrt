@@ -1,0 +1,111 @@
+<%#
+ JunWRT Carrier-Grade 5G LuCI Argon Theme
+ Branded Carrier-Grade Footer
+-%>
+
+<%
+	local version = require "luci.version"
+	if not blank_page then
+%>
+				</div>
+			</div>
+			<footer class="mobile-hide" style="text-wrap: auto; padding: 1rem 1.5rem; margin-top: auto;">
+				<div class="footer-content" style="display: flex; flex-wrap: wrap; gap: 0.75rem; justify-content: space-between; align-items: center; font-size: 0.75rem;">
+					<div style="display: flex; align-items: center; gap: 6px;">
+						<strong style="color: #5e72e4; font-weight: 700;">JunWRT OS 19.07-Carrier</strong>
+						<span>•</span>
+						<span>MediaTek MT6890 / T750 5G &amp; MT7915 Wi-Fi 6</span>
+						<span>•</span>
+						<span style="color: #2dce89; font-weight: 600;">High-Throughput Core</span>
+					</div>
+					<div style="display: flex; align-items: center; gap: 8px;">
+						<span>Crafted with ❤️ by Jun</span>
+						<ul class="breadcrumb pull-right" id="modemenu" style="display:none"></ul>
+					</div>
+				</div>
+			</footer>
+		</div>
+	</div>
+<% end %>
+<% if not blank_page then %>
+<script type="text/javascript">L.require('menu-argon')</script>
+<script type="text/javascript">L.require('junwrt.integrity').catch(L.error)</script>
+<% end %>
+<script type="text/javascript">
+(function() {
+	function initQuickFind() {
+		var input = document.getElementById('junwrt-nav-search');
+		var toggle = document.getElementById('junwrt-nav-search-toggle');
+		var results = document.getElementById('junwrt-nav-results');
+		var menu = document.getElementById('mainmenu');
+		if (!input || !results || !menu || input._junwrtBound) return;
+		input._junwrtBound = true;
+		if (toggle) toggle.addEventListener('click', function() {
+			var open = input.classList.toggle('is-mobile-open');
+			toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+			if (open) input.focus();
+		});
+
+		function closeResults() {
+			results.hidden = true;
+			results.textContent = '';
+		}
+
+		function renderResults(query) {
+			results.textContent = '';
+			var needle = query.trim().toLowerCase();
+			if (!needle) {
+				closeResults();
+				return;
+			}
+
+			var links = menu.querySelectorAll('a[href]');
+			var matches = [];
+			for (var i = 0; i < links.length && matches.length < 8; i++) {
+				var title = (links[i].textContent || '').trim();
+				if (title && title.toLowerCase().indexOf(needle) !== -1)
+					matches.push({ title: title, href: links[i].href });
+			}
+
+			if (!matches.length) {
+				var empty = document.createElement('div');
+				empty.className = 'jun-header-search-empty';
+				empty.textContent = 'No matching settings';
+				results.appendChild(empty);
+				results.hidden = false;
+				return;
+			}
+
+			matches.forEach(function(match) {
+				var link = document.createElement('a');
+				link.className = 'jun-header-search-result';
+				link.href = match.href;
+				link.textContent = match.title;
+				link.addEventListener('click', closeResults);
+				results.appendChild(link);
+			});
+			results.hidden = false;
+		}
+
+		input.addEventListener('input', function() { renderResults(input.value); });
+		input.addEventListener('keydown', function(ev) {
+			if (ev.key === 'Escape') {
+				input.value = '';
+				closeResults();
+			}
+		});
+		document.addEventListener('click', function(ev) {
+			if (!input.parentNode.contains(ev.target)) {
+				closeResults();
+				input.classList.remove('is-mobile-open');
+				if (toggle) toggle.setAttribute('aria-expanded', 'false');
+			}
+		});
+	}
+
+	document.addEventListener('luci-loaded', initQuickFind);
+	window.setTimeout(initQuickFind, 800);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,69 @@
+#!/usr/bin/lua
+local json = require 'luci.jsonc'
+local cursor = require('luci.model.uci').cursor()
+
+local function emit(value)
+    print(json.stringify(value))
+end
+
+local function fail(message)
+    emit({error = message})
+    os.exit(1)
+end
+
+local function queries()
+    local log = io.popen('/sbin/logread -l 1600 2>/dev/null', 'r')
+    if not log then return {} end
+    local rows = {}
+    for line in log:lines() do
+        local time, message = line:match('^(.-)%s+[%a.]+%s+dnsmasq%[%d+%]:%s+(.+)$')
+        if message then
+            -- log-queries=extra includes a serial and a client endpoint before the message.
+            message = message:gsub('^%d+%s+', ''):gsub('^[%x:.]+[/#]%d+%s+', '')
+            local kind, domain, address = message:match('^query%[([%w]+)%]%s+([%w%._%-]+)%s+from%s+([%x:.]+)%s*$')
+            if address and (address:find('.', 1, true) or address:find(':', 1, true)) and #domain <= 253 then
+                rows[#rows + 1] = {time = time, kind = kind, domain = domain, address = address}
+            end
+        end
+    end
+    log:close()
+    local latest = {}
+    for i = #rows, math.max(#rows - 199, 1), -1 do latest[#latest + 1] = rows[i] end
+    return latest
+end
+
+local action = arg[1]
+if arg[2] or (action ~= 'status' and action ~= 'enable' and action ~= 'disable') then
+    fail('Unknown DNS History action.')
+end
+
+local section
+cursor:foreach('dhcp', 'dnsmasq', function(entry)
+    if section then section = false; return false end
+    section = entry['.name']
+end)
+if not section then fail('DNS History requires a single configured dnsmasq instance.') end
+local previous = cursor:get('dhcp', section, 'logqueries')
+local enabled = previous == '1' or previous == 'true' or previous == 'yes' or previous == 'on'
+local facility = cursor:get('dhcp', section, 'logfacility')
+if facility and facility:find('/', 1, true) then
+    fail('DNS History reads the system log. dnsmasq currently logs to a separate file.')
+end
+
+if action == 'status' then
+    emit({enabled = enabled, queries = enabled and queries() or {}})
+    return
+end
+
+local wanted = action == 'enable'
+if enabled == wanted then emit({enabled = enabled}); return end
+if not cursor:set('dhcp', section, 'logqueries', wanted and '1' or '0') or not cursor:commit('dhcp') then
+    fail('Could not save the DNS logging setting.')
+end
+if os.execute('/etc/init.d/dnsmasq restart >/dev/null 2>&1') ~= 0 then
+    if previous then cursor:set('dhcp', section, 'logqueries', previous)
+    else cursor:delete('dhcp', section, 'logqueries') end
+    local restored = cursor:commit('dhcp') and os.execute('/etc/init.d/dnsmasq restart >/dev/null 2>&1') == 0
+    fail(restored and 'DNS restart failed. The previous setting was restored.' or 'DNS restart failed. Check the dnsmasq service.')
+end
+emit({enabled = wanted})

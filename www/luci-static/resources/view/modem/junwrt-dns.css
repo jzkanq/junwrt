@@ -1,0 +1,6 @@
+.ju-dns-page .ju-dns-actions{display:flex;flex-wrap:wrap;gap:8px;margin-block:16px}
+.ju-dns-page .ju-dns-row{padding:12px 0;overflow-wrap:anywhere}
+.ju-dns-page .ju-dns-row + .ju-dns-row{border-top:1px solid var(--ju-border,#e2e8f0)}
+#maincontent .ju-dns-page .ju-amber{background:#f59e0b!important;color:#ffffff!important;border:1px solid #f59e0b!important}
+#maincontent .ju-dns-page .ju-amber:hover{background:#d97706!important}
+html[data-theme=dark] #maincontent .ju-dns-page .ju-dns-row + .ju-dns-row{border-color:#3f4044}

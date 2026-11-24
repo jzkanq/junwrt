@@ -51,6 +51,8 @@ load_config() {
 	local line key value
 	ENABLED=0; INTERVAL=5; FAILURES=2; COOLDOWN=300; GRACE=60; MAX_PER_DAY=6
 	REDIAL=1; RADIO=0; REBOOT=0; TARGETS='1.1.1.1 8.8.8.8'; IFACE=wan
+	# Start with WAN refresh on when no settings have been saved.
+	[ -e "$ROOT/etc/config/$CONFIG" ] || ENABLED=1
 	while IFS= read -r line; do
 		case "$line" in
 			"$CONFIG.main."*) ;;
@@ -62,7 +64,7 @@ load_config() {
 		value="${value#\'}"
 		value="${value%\'}"
 		case "$key" in
-			enabled) [ "$value" = 1 ] && ENABLED=1 ;;
+			enabled) ENABLED=0; [ "$value" = 1 ] && ENABLED=1 ;;
 			interval) INTERVAL="$(within "$value" 5 600 5)" ;;
 			failures) FAILURES="$(within "$value" 2 20 2)" ;;
 			cooldown) COOLDOWN="$(within "$value" 60 3600 300)" ;;
